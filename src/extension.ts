@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ConfigManager } from './configManager';
+import { ConfigManager, ConfigScope } from './configManager';
 import { TerminalTasksProvider, TaskTreeItem, TaskConfigDialog, FolderQuickPick, TmuxSessionData, ZellijSessionData, TerminalTasksDragAndDropController } from './terminalWorkspacesProvider';
 import { RemoteConfig, TerminalTaskItem, TaskFolder } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
@@ -204,11 +204,33 @@ function findDuplicateRemote(remotes: RemoteConfig[], host: string, label: strin
 export function activate(context: vscode.ExtensionContext) {
     console.log('Terminal Workspaces is now active');
 
-    configManager = new ConfigManager();
+    configManager = new ConfigManager(context);
     treeDataProvider = new TerminalTasksProvider(configManager);
 
     // Initialize config
     configManager.loadConfig();
+
+    // Re-load config when workspace folders open/close (global ↔ workspace switch)
+    const workspaceFolderListener = vscode.workspace.onDidChangeWorkspaceFolders(async () => {
+        await configManager.loadConfig();
+        treeDataProvider.refresh();
+        // Update context key so the title bar can show current scope
+        vscode.commands.executeCommand(
+            'setContext',
+            'terminalWorkspaces.configScope',
+            configManager.getConfigScope()
+        );
+    });
+    context.subscriptions.push(workspaceFolderListener);
+
+    // Set initial scope context key
+    configManager.getConfig().then(() => {
+        vscode.commands.executeCommand(
+            'setContext',
+            'terminalWorkspaces.configScope',
+            configManager.getConfigScope()
+        );
+    });
 
     // Create and register the tree view
     const dragAndDropController = new TerminalTasksDragAndDropController(configManager, treeDataProvider);
@@ -485,6 +507,78 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showInformationMessage(`Added remote "${remote.label}"`);
             } catch (error) {
                 vscode.window.showErrorMessage(`Failed to add remote: ${error}`);
+            }
+        }
+    );
+
+    const deleteRemoteCommand = vscode.commands.registerCommand(
+        'terminalWorkspaces.deleteRemote',
+        async (item?: TaskTreeItem) => {
+            const remote = item?.itemData?.type === 'remoteHeader'
+                ? item.itemData.remote
+                : undefined;
+
+            if (!remote) {
+                return;
+            }
+
+            // Show QuickPick immediately — do NOT pre-fetch sessions (SSH round-trip = high latency)
+            type DeleteAction = 'deleteOnly' | 'deleteWithSessions';
+            const actions: (vscode.QuickPickItem & { action: DeleteAction })[] = [
+                {
+                    label: '$(trash) Delete remote config only',
+                    description: 'Existing sessions keep running, tasks move to local',
+                    action: 'deleteOnly'
+                },
+                {
+                    label: '$(debug-stop) Delete remote config and kill all sessions',
+                    description: 'Kill all tmux/zellij sessions on this remote before removing',
+                    action: 'deleteWithSessions'
+                }
+            ];
+
+            const pick = await vscode.window.showQuickPick(actions, {
+                placeHolder: `Delete remote "${remote.label}" — choose action`,
+                ignoreFocusOut: true
+            });
+
+            if (!pick) {
+                return;
+            }
+
+            try {
+                if (pick.action === 'deleteWithSessions' && remote.type === 'ssh') {
+                    // Fetch session counts now (user already confirmed intent via QuickPick)
+                    let tmuxCount = 0;
+                    let zellijCount = 0;
+                    try { tmuxCount = TmuxManager.getSessions(remote).length; } catch { /* ignore */ }
+                    try { zellijCount = ZellijManager.getSessions(remote).length; } catch { /* ignore */ }
+                    const sessionTotal = tmuxCount + zellijCount;
+
+                    if (sessionTotal > 0) {
+                        const confirm = await vscode.window.showWarningMessage(
+                            `Kill all ${sessionTotal} session(s) on remote "${remote.label}"? This cannot be undone.`,
+                            { modal: true },
+                            'Kill & Delete'
+                        );
+                        if (confirm !== 'Kill & Delete') {
+                            return;
+                        }
+                    }
+
+                    await vscode.window.withProgress(
+                        { location: vscode.ProgressLocation.Notification, title: `Killing sessions on ${remote.label}...`, cancellable: false },
+                        async () => {
+                            TmuxManager.deleteAllSessionsSync(remote);
+                            ZellijManager.deleteAllSessionsSync(remote);
+                        }
+                    );
+                }
+                await configManager.deleteRemote(remote.id);
+                treeDataProvider.refresh();
+                vscode.window.showInformationMessage(`Deleted remote "${remote.label}"`);
+            } catch (error) {
+                vscode.window.showErrorMessage(`Failed to delete remote: ${error}`);
             }
         }
     );
@@ -2459,6 +2553,7 @@ export function activate(context: vscode.ExtensionContext) {
         treeView,
         refreshCommand,
         addRemoteCommand,
+        deleteRemoteCommand,
         addTaskToRemoteCommand,
         addFolderCommand,
         addCurrentFileFolderCommand,

@@ -330,41 +330,77 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * Called at the start of each tree refresh to ensure accurate state
      */
     private refreshActiveSessionsCache(remotes: RemoteConfig[]): void {
-        // Refresh tmux sessions
-        this.activeTmuxSessions.clear();
-        this.allTmuxSessions.clear();
+        // Local remotes are queried synchronously (fast, no network).
+        // SSH remotes are queried asynchronously so they never block tree rendering:
+        // results are stored when ready and a tree refresh is triggered automatically.
+        const localRemotes = remotes.filter(r => r.type !== 'ssh');
+        const sshRemotes = remotes.filter(r => r.type === 'ssh');
+
+        // Synchronous pass for local remotes
+        this.refreshRemotesSync(localRemotes);
+
+        // Async pass for SSH remotes — doesn't block getChildren
+        if (sshRemotes.length > 0) {
+            this.refreshRemotesAsync(sshRemotes);
+        }
+    }
+
+    private refreshRemotesSync(remotes: RemoteConfig[]): void {
         for (const remote of remotes) {
             const remoteId = normalizeRemoteId(remote.id);
-            const active = new Set<string>();
+            // tmux
+            const activeTmux = new Set<string>();
             try {
                 const sessions = TmuxManager.getSessions(remote);
                 this.allTmuxSessions.set(remoteId, sessions);
-                for (const session of sessions) {
-                    active.add(session.name.toLowerCase());
-                }
+                for (const s of sessions) { activeTmux.add(s.name.toLowerCase()); }
             } catch {
                 this.allTmuxSessions.set(remoteId, []);
             }
-            this.activeTmuxSessions.set(remoteId, active);
-        }
-
-        // Refresh zellij sessions
-        this.activeZellijSessions.clear();
-        this.allZellijSessions.clear();
-        for (const remote of remotes) {
-            const remoteId = normalizeRemoteId(remote.id);
-            const active = new Set<string>();
+            this.activeTmuxSessions.set(remoteId, activeTmux);
+            // zellij
+            const activeZellij = new Set<string>();
             try {
                 const sessions = ZellijManager.getSessions(remote);
                 this.allZellijSessions.set(remoteId, sessions);
-                for (const session of sessions) {
-                    active.add(session.name.toLowerCase());
-                }
+                for (const s of sessions) { activeZellij.add(s.name.toLowerCase()); }
             } catch {
                 this.allZellijSessions.set(remoteId, []);
             }
-            this.activeZellijSessions.set(remoteId, active);
+            this.activeZellijSessions.set(remoteId, activeZellij);
         }
+    }
+
+    private refreshRemotesAsync(remotes: RemoteConfig[]): void {
+        Promise.all(remotes.map(async remote => {
+            const remoteId = normalizeRemoteId(remote.id);
+            // tmux
+            const activeTmux = new Set<string>();
+            try {
+                const sessions = await Promise.resolve(TmuxManager.getSessions(remote));
+                this.allTmuxSessions.set(remoteId, sessions);
+                for (const s of sessions) { activeTmux.add(s.name.toLowerCase()); }
+            } catch {
+                this.allTmuxSessions.set(remoteId, []);
+            }
+            this.activeTmuxSessions.set(remoteId, activeTmux);
+            // zellij
+            const activeZellij = new Set<string>();
+            try {
+                const sessions = await Promise.resolve(ZellijManager.getSessions(remote));
+                this.allZellijSessions.set(remoteId, sessions);
+                for (const s of sessions) { activeZellij.add(s.name.toLowerCase()); }
+            } catch {
+                this.allZellijSessions.set(remoteId, []);
+            }
+            this.activeZellijSessions.set(remoteId, activeZellij);
+            // Clear untracked caches for this remote so next render picks up fresh data
+            this.cachedUntrackedTmuxSessions.delete(remoteId);
+            this.cachedUntrackedZellijSessions.delete(remoteId);
+        })).then(() => {
+            // Re-render the tree now that SSH data is available
+            this._onDidChangeTreeData.fire(undefined);
+        }).catch(() => { /* ignore */ });
     }
 
     /**

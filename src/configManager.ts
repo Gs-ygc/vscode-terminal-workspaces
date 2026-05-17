@@ -12,19 +12,49 @@ import {
 } from './types';
 import { buildSshCommand, createLocalRemote, LOCAL_REMOTE_ID, normalizeRemoteId, shellQuote } from './remoteUtils';
 
+export type ConfigScope = 'workspace' | 'global';
+
 export class ConfigManager {
     private config: TerminalTasksConfig | null = null;
     private configUri: vscode.Uri | null = null;
+    private configScope: ConfigScope = 'global';
+
+    constructor(private readonly context: vscode.ExtensionContext) {}
 
     /**
-     * Get the config file path for the current workspace
+     * Which scope is currently active ('workspace' or 'global').
      */
-    private getConfigUri(): vscode.Uri | undefined {
+    getConfigScope(): ConfigScope {
+        return this.configScope;
+    }
+
+    /**
+     * Get the workspace-scoped config URI (only if a workspace folder is open).
+     */
+    private getWorkspaceConfigUri(): vscode.Uri | undefined {
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) {
             return undefined;
         }
         return vscode.Uri.joinPath(folders[0].uri, '.vscode', 'terminal-workspaces.json');
+    }
+
+    /**
+     * Get the global (user-scoped) config URI stored in extension global storage.
+     */
+    private getGlobalConfigUri(): vscode.Uri {
+        return vscode.Uri.joinPath(this.context.globalStorageUri, 'terminal-workspaces.json');
+    }
+
+    /**
+     * Resolve the best config URI: workspace when available, otherwise global.
+     */
+    private resolveConfigUri(): { uri: vscode.Uri; scope: ConfigScope } {
+        const workspaceUri = this.getWorkspaceConfigUri();
+        if (workspaceUri) {
+            return { uri: workspaceUri, scope: 'workspace' };
+        }
+        return { uri: this.getGlobalConfigUri(), scope: 'global' };
     }
 
     private getVscodeDirUri(): vscode.Uri | undefined {
@@ -36,10 +66,11 @@ export class ConfigManager {
     }
 
     getConfigFileUri(): vscode.Uri | undefined {
-        return this.getConfigUri();
+        return this.configUri ?? undefined;
     }
 
     getTasksJsonUri(): vscode.Uri | undefined {
+        // tasks.json is only meaningful in a workspace context
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) {
             return undefined;
@@ -57,29 +88,25 @@ export class ConfigManager {
     }
 
     /**
-     * Load configuration from file or create default
+     * Load configuration from file or create default.
+     * Prefers workspace config when a workspace is open; falls back to global storage.
      */
     async loadConfig(): Promise<TerminalTasksConfig> {
-        const configUri = this.getConfigUri();
-        if (!configUri) {
-            return this.normalizeConfig({ ...DEFAULT_CONFIG });
-        }
+        const { uri, scope } = this.resolveConfigUri();
+        this.configScope = scope;
+        this.configUri = uri;
 
-        this.configUri = configUri;
+        // Ensure the parent directory exists
+        const parentUri = vscode.Uri.joinPath(uri, '..');
+        await vscode.workspace.fs.createDirectory(parentUri);
 
-        // Ensure .vscode directory exists
-        const vscodeDirUri = this.getVscodeDirUri();
-        if (vscodeDirUri) {
-            await vscode.workspace.fs.createDirectory(vscodeDirUri);
-        }
-
-        if (!(await this.uriExists(configUri))) {
+        if (!(await this.uriExists(uri))) {
             this.config = this.normalizeConfig({ ...DEFAULT_CONFIG });
             return this.config;
         }
 
         try {
-            const content = Buffer.from(await vscode.workspace.fs.readFile(configUri)).toString('utf8');
+            const content = Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
             this.config = this.normalizeConfig(JSON.parse(content));
             return this.config!;
         } catch (error) {
@@ -132,22 +159,36 @@ export class ConfigManager {
     }
 
     /**
-     * Save configuration to file
+     * Save configuration to file (workspace or global storage, whichever is active).
      */
     async saveConfig(): Promise<void> {
-        if (!this.configUri || !this.config) {
+        if (!this.config) {
             throw new Error('No configuration loaded');
         }
 
-        const content = JSON.stringify(this.config, null, 2);
-        const vscodeDirUri = this.getVscodeDirUri();
-        if (vscodeDirUri) {
-            await vscode.workspace.fs.createDirectory(vscodeDirUri);
+        // If configUri is not set yet (first save before any loadConfig), resolve it now
+        if (!this.configUri) {
+            const { uri, scope } = this.resolveConfigUri();
+            this.configUri = uri;
+            this.configScope = scope;
         }
+
+        const parentUri = vscode.Uri.joinPath(this.configUri, '..');
+        await vscode.workspace.fs.createDirectory(parentUri);
+
+        // Also ensure .vscode dir exists when writing workspace config
+        if (this.configScope === 'workspace') {
+            const vscodeDirUri = this.getVscodeDirUri();
+            if (vscodeDirUri) {
+                await vscode.workspace.fs.createDirectory(vscodeDirUri);
+            }
+        }
+
+        const content = JSON.stringify(this.config, null, 2);
         await vscode.workspace.fs.writeFile(this.configUri, Buffer.from(content, 'utf8'));
 
-        // Auto-generate tasks.json if enabled
-        if (this.config.settings.autoGenerateTasksJson) {
+        // tasks.json is only generated for workspace configs
+        if (this.configScope === 'workspace' && this.config.settings.autoGenerateTasksJson) {
             await this.generateTasksJson();
         }
     }
@@ -223,6 +264,30 @@ export class ConfigManager {
         config.remotes.push(newRemote);
         await this.saveConfig();
         return newRemote;
+    }
+
+    async deleteRemote(remoteId: string): Promise<void> {
+        const config = await this.getConfig();
+        const index = config.remotes.findIndex(r => r.id === remoteId);
+        if (index === -1) {
+            throw new Error(`Remote "${remoteId}" not found`);
+        }
+        if (config.remotes[index].type === 'local') {
+            throw new Error('Cannot delete the local host entry');
+        }
+        config.remotes.splice(index, 1);
+        // Clear remoteId from tasks that pointed at this remote
+        const clearRemote = (items: import('./types').TaskItem[]) => {
+            for (const item of items) {
+                if (item.type === 'task' && item.remoteId === remoteId) {
+                    delete item.remoteId;
+                } else if (item.type === 'folder') {
+                    clearRemote(item.children);
+                }
+            }
+        };
+        clearRemote(config.items);
+        await this.saveConfig();
     }
 
     private sanitizeRemoteId(value: string): string {
