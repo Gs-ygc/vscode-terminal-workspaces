@@ -18,6 +18,19 @@ export type ZellijMode = 'none' | 'attach-or-create' | 'always-new' | 'attach-on
 /** Type of terminal multiplexer to use */
 export type MultiplexerType = 'none' | 'tmux' | 'zellij';
 
+export interface RemoteConfig {
+    /** Stable ID used by tasks */
+    id: string;
+    /** Display name shown in the tree */
+    label: string;
+    /** Local extension host or an SSH target reachable from this host */
+    type: 'local' | 'ssh';
+    /** SSH host/alias, for example "k1" or "user@host" */
+    host?: string;
+    /** Extra SSH arguments, for example ["-p", "2222"] */
+    sshArgs?: string[];
+}
+
 export interface TerminalColor {
     /** Terminal tab background color (hex or VS Code theme color) */
     background?: string;
@@ -93,6 +106,8 @@ export interface TaskItemBase {
 
 export interface TerminalTaskItem extends TaskItemBase {
     type: 'task';
+    /** Remote target ID. Missing means the local extension host. */
+    remoteId?: string;
     /** Path to the directory */
     path: string;
     /** Profile ID to use (defaults to 'default') */
@@ -122,6 +137,8 @@ export interface TerminalTasksConfig {
     profiles: Profile[];
     /** Default profile ID to use for new tasks */
     defaultProfileId: string;
+    /** Remote targets shown as top-level tree groups */
+    remotes: RemoteConfig[];
     /** Root-level task items */
     items: TaskItem[];
     /** Global settings */
@@ -226,6 +243,13 @@ export const DEFAULT_CONFIG: TerminalTasksConfig = {
     version: '1.0.0',
     profiles: [],
     defaultProfileId: 'wsl-default',
+    remotes: [
+        {
+            id: 'local',
+            label: 'Host',
+            type: 'local'
+        }
+    ],
     items: [],
     settings: {
         autoGenerateTasksJson: true,

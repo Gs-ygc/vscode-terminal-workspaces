@@ -57,8 +57,9 @@ export class TasksManager {
      * Detect if running on Windows (either native or via WSL remote)
      */
     private isWindows(): boolean {
-        // If we're in WSL remote, the workspace is in WSL
-        if (this.isRemoteWSL()) {
+        // Remote extension hosts execute tasks on the remote machine, even when
+        // the VS Code UI is running on Windows.
+        if (vscode.env.remoteName) {
             return false;
         }
         // Check the actual platform

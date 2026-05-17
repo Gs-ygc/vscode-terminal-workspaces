@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
 import { execSync } from 'child_process';
+import { RemoteConfig } from './types';
+import { buildSshCommand, normalizeRemoteId, shellQuote } from './remoteUtils';
 
 export interface ZellijSession {
     /** Session name */
@@ -13,6 +15,10 @@ export interface ZellijSession {
     path?: string;
     /** Whether the session is in EXITED state (processes terminated, can be resurrected or deleted) */
     exited: boolean;
+    /** Remote target ID that owns this session */
+    remoteId?: string;
+    /** Remote display label */
+    remoteLabel?: string;
 }
 
 export class ZellijManager {
@@ -21,7 +27,7 @@ export class ZellijManager {
      */
     static isAvailable(): boolean {
         try {
-            if (this.isRemoteWSL()) {
+            if (this.shouldUseLocalCommand()) {
                 execSync('which zellij', { encoding: 'utf8', stdio: 'pipe' });
             } else if (process.platform === 'win32') {
                 execSync('wsl.exe -e which zellij', { encoding: 'utf8', stdio: 'pipe' });
@@ -38,12 +44,17 @@ export class ZellijManager {
      * Get all zellij sessions
      * Note: Zellij's list-sessions output is simpler than tmux - just session names with ANSI colors
      */
-    static getSessions(): ZellijSession[] {
+    static getSessions(remote?: RemoteConfig): ZellijSession[] {
         try {
             let output: string;
 
-            if (this.isRemoteWSL()) {
-                // Already in WSL
+            if (remote?.type === 'ssh') {
+                output = execSync(buildSshCommand(remote, 'zellij list-sessions 2>/dev/null || true', false), {
+                    encoding: 'utf8',
+                    stdio: 'pipe',
+                    timeout: 5000
+                });
+            } else if (this.shouldUseLocalCommand()) {
                 output = execSync('zellij list-sessions 2>/dev/null || true', {
                     encoding: 'utf8',
                     stdio: 'pipe',
@@ -71,8 +82,9 @@ export class ZellijManager {
 
             // Strip ANSI color codes and parse session names
             // Zellij output format is typically: session_name (with optional ANSI colors)
+            const remoteId = normalizeRemoteId(remote?.id);
             return output.trim().split('\n')
-                .map(line => {
+                .map((line): ZellijSession | null => {
                     // Strip ANSI escape codes
                     const cleanLine = line.replace(/\x1b\[[0-9;]*m/g, '').trim();
                     // Zellij may show status info after session name, extract just the name
@@ -83,7 +95,9 @@ export class ZellijManager {
                     const exited = cleanLine.includes('EXITED');
                     return {
                         name,
-                        exited
+                        exited,
+                        remoteId,
+                        remoteLabel: remote?.label
                     };
                 })
                 .filter((s): s is ZellijSession => s !== null && s.name.length > 0);
@@ -108,15 +122,23 @@ export class ZellijManager {
     /**
      * Get command to attach to a zellij session
      */
-    static getAttachCommand(sessionName: string): string {
-        return `zellij attach '${this.escapeForShell(sessionName)}'`;
+    static getAttachCommand(sessionName: string, remote?: RemoteConfig): string {
+        const command = `zellij attach ${shellQuote(sessionName)}`;
+        if (remote?.type === 'ssh') {
+            return buildSshCommand(remote, command, true);
+        }
+        return command;
     }
 
     /**
      * Get command to create a new zellij session
      */
-    static getNewSessionCommand(sessionName: string): string {
-        return `zellij -s '${this.escapeForShell(sessionName)}'`;
+    static getNewSessionCommand(sessionName: string, remote?: RemoteConfig): string {
+        const command = `zellij -s ${shellQuote(sessionName)}`;
+        if (remote?.type === 'ssh') {
+            return buildSshCommand(remote, command, true);
+        }
+        return command;
     }
 
     /**
@@ -124,9 +146,13 @@ export class ZellijManager {
      * Zellij doesn't have a direct equivalent to tmux's -A flag,
      * so we use a shell conditional
      */
-    static getAttachOrCreateCommand(sessionName: string): string {
-        const escaped = this.escapeForShell(sessionName);
-        return `zellij attach '${escaped}' 2>/dev/null || zellij -s '${escaped}'`;
+    static getAttachOrCreateCommand(sessionName: string, remote?: RemoteConfig): string {
+        const quoted = shellQuote(sessionName);
+        const command = `zellij attach ${quoted} 2>/dev/null || zellij -s ${quoted}`;
+        if (remote?.type === 'ssh') {
+            return buildSshCommand(remote, command, true);
+        }
+        return command;
     }
 
     /**
@@ -134,18 +160,26 @@ export class ZellijManager {
      * Note: kill-session terminates processes but leaves session in EXITED state
      * (can be resurrected by attaching)
      */
-    static getKillCommand(sessionName: string): string {
-        return `zellij kill-session '${this.escapeForShell(sessionName)}'`;
+    static getKillCommand(sessionName: string, remote?: RemoteConfig): string {
+        const command = `zellij kill-session ${shellQuote(sessionName)}`;
+        if (remote?.type === 'ssh') {
+            return buildSshCommand(remote, command, false);
+        }
+        return command;
     }
 
     /**
      * Get command to delete a zellij session
      * Note: delete-session fully removes the session (cannot be resurrected)
      */
-    static getDeleteCommand(sessionName: string): string {
-        const escaped = this.escapeForShell(sessionName);
+    static getDeleteCommand(sessionName: string, remote?: RemoteConfig): string {
+        const quoted = shellQuote(sessionName);
         // Kill first (in case session is still running), then delete
-        return `zellij kill-session '${escaped}' 2>/dev/null; zellij delete-session '${escaped}'`;
+        const command = `zellij kill-session ${quoted} 2>/dev/null; zellij delete-session ${quoted}`;
+        if (remote?.type === 'ssh') {
+            return buildSshCommand(remote, command, false);
+        }
+        return command;
     }
 
     /**
@@ -198,8 +232,8 @@ export class ZellijManager {
     /**
      * Check if a specific session is in EXITED state
      */
-    static isSessionExited(sessionName: string): boolean {
-        const sessions = this.getSessions();
+    static isSessionExited(sessionName: string, remote?: RemoteConfig): boolean {
+        const sessions = this.getSessions(remote);
         const session = sessions.find(s => s.name === sessionName);
         return session?.exited ?? false;
     }
@@ -207,13 +241,14 @@ export class ZellijManager {
     /**
      * Synchronously kill+delete a session (for cleaning up EXITED sessions before task launch)
      */
-    static deleteSessionSync(sessionName: string): void {
-        const escaped = this.escapeForShell(sessionName);
-        const isWindows = process.platform === 'win32';
-
-        const cmd = (this.isRemoteWSL() || !isWindows)
-            ? `zellij kill-session '${escaped}' 2>/dev/null; zellij delete-session '${escaped}' 2>/dev/null`
-            : `wsl.exe -e bash -lc "zellij kill-session '${escaped}' 2>/dev/null; zellij delete-session '${escaped}' 2>/dev/null"`;
+    static deleteSessionSync(sessionName: string, remote?: RemoteConfig): void {
+        const quoted = shellQuote(sessionName);
+        const localCommand = `zellij kill-session ${quoted} 2>/dev/null; zellij delete-session ${quoted} 2>/dev/null`;
+        const cmd = remote?.type === 'ssh'
+            ? buildSshCommand(remote, localCommand, false)
+            : this.shouldUseLocalCommand()
+                ? localCommand
+                : `wsl.exe -e bash -lc "zellij kill-session '${this.escapeForShell(sessionName)}' 2>/dev/null; zellij delete-session '${this.escapeForShell(sessionName)}' 2>/dev/null"`;
 
         try {
             execSync(cmd, { stdio: 'pipe', timeout: 5000 });
@@ -222,7 +257,7 @@ export class ZellijManager {
         }
     }
 
-    private static isRemoteWSL(): boolean {
-        return vscode.env.remoteName === 'wsl';
+    private static shouldUseLocalCommand(): boolean {
+        return vscode.env.remoteName !== undefined || process.platform !== 'win32';
     }
 }

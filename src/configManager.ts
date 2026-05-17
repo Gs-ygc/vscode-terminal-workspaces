@@ -1,75 +1,150 @@
 import * as vscode from 'vscode';
-import * as fs from 'fs';
-import * as path from 'path';
 import {
     TerminalTasksConfig,
     TaskItem,
     TerminalTaskItem,
     TaskFolder,
     Profile,
+    RemoteConfig,
     FlattenedTask,
     BUILTIN_PROFILES,
     DEFAULT_CONFIG
 } from './types';
+import { buildSshCommand, createLocalRemote, LOCAL_REMOTE_ID, normalizeRemoteId, shellQuote } from './remoteUtils';
 
 export class ConfigManager {
     private config: TerminalTasksConfig | null = null;
-    private configPath: string | null = null;
+    private configUri: vscode.Uri | null = null;
 
     /**
      * Get the config file path for the current workspace
      */
-    private getConfigPath(): string | undefined {
+    private getConfigUri(): vscode.Uri | undefined {
         const folders = vscode.workspace.workspaceFolders;
         if (!folders || folders.length === 0) {
             return undefined;
         }
-        return path.join(folders[0].uri.fsPath, '.vscode', 'terminal-workspaces.json');
+        return vscode.Uri.joinPath(folders[0].uri, '.vscode', 'terminal-workspaces.json');
+    }
+
+    private getVscodeDirUri(): vscode.Uri | undefined {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) {
+            return undefined;
+        }
+        return vscode.Uri.joinPath(folders[0].uri, '.vscode');
+    }
+
+    getConfigFileUri(): vscode.Uri | undefined {
+        return this.getConfigUri();
+    }
+
+    getTasksJsonUri(): vscode.Uri | undefined {
+        const folders = vscode.workspace.workspaceFolders;
+        if (!folders || folders.length === 0) {
+            return undefined;
+        }
+        return vscode.Uri.joinPath(folders[0].uri, '.vscode', 'tasks.json');
+    }
+
+    private async uriExists(uri: vscode.Uri): Promise<boolean> {
+        try {
+            await vscode.workspace.fs.stat(uri);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     /**
      * Load configuration from file or create default
      */
     async loadConfig(): Promise<TerminalTasksConfig> {
-        const configPath = this.getConfigPath();
-        if (!configPath) {
-            return { ...DEFAULT_CONFIG };
+        const configUri = this.getConfigUri();
+        if (!configUri) {
+            return this.normalizeConfig({ ...DEFAULT_CONFIG });
         }
 
-        this.configPath = configPath;
+        this.configUri = configUri;
 
         // Ensure .vscode directory exists
-        const vscodePath = path.dirname(configPath);
-        if (!fs.existsSync(vscodePath)) {
-            fs.mkdirSync(vscodePath, { recursive: true });
+        const vscodeDirUri = this.getVscodeDirUri();
+        if (vscodeDirUri) {
+            await vscode.workspace.fs.createDirectory(vscodeDirUri);
         }
 
-        if (!fs.existsSync(configPath)) {
-            this.config = { ...DEFAULT_CONFIG };
+        if (!(await this.uriExists(configUri))) {
+            this.config = this.normalizeConfig({ ...DEFAULT_CONFIG });
             return this.config;
         }
 
         try {
-            const content = fs.readFileSync(configPath, 'utf8');
-            this.config = JSON.parse(content);
+            const content = Buffer.from(await vscode.workspace.fs.readFile(configUri)).toString('utf8');
+            this.config = this.normalizeConfig(JSON.parse(content));
             return this.config!;
         } catch (error) {
             console.error('Failed to load terminal-workspaces.json:', error);
-            this.config = { ...DEFAULT_CONFIG };
+            this.config = this.normalizeConfig({ ...DEFAULT_CONFIG });
             return this.config;
         }
+    }
+
+    private normalizeConfig(config: TerminalTasksConfig): TerminalTasksConfig {
+        const normalized: TerminalTasksConfig = {
+            ...DEFAULT_CONFIG,
+            ...config,
+            settings: {
+                ...DEFAULT_CONFIG.settings,
+                ...(config.settings || {})
+            },
+            profiles: config.profiles || [],
+            items: config.items || [],
+            remotes: config.remotes?.length ? config.remotes : [createLocalRemote()]
+        };
+
+        const hasLocal = normalized.remotes.some(remote => remote.type === 'local');
+        if (!hasLocal) {
+            normalized.remotes.unshift(createLocalRemote());
+        }
+
+        normalized.remotes = normalized.remotes.map(remote => ({
+            ...remote,
+            id: remote.type === 'local'
+                ? LOCAL_REMOTE_ID
+                : remote.id || remote.host || remote.label,
+            label: remote.label || remote.id || remote.host || 'Remote'
+        }));
+
+        const remoteIds = new Set(normalized.remotes.map(remote => remote.id));
+        const normalizeItems = (items: TaskItem[]) => {
+            for (const item of items) {
+                if (item.type === 'task') {
+                    const remoteId = normalizeRemoteId(item.remoteId);
+                    item.remoteId = remoteIds.has(remoteId) ? remoteId : LOCAL_REMOTE_ID;
+                } else {
+                    normalizeItems(item.children);
+                }
+            }
+        };
+        normalizeItems(normalized.items);
+
+        return normalized;
     }
 
     /**
      * Save configuration to file
      */
     async saveConfig(): Promise<void> {
-        if (!this.configPath || !this.config) {
+        if (!this.configUri || !this.config) {
             throw new Error('No configuration loaded');
         }
 
         const content = JSON.stringify(this.config, null, 2);
-        fs.writeFileSync(this.configPath, content, 'utf8');
+        const vscodeDirUri = this.getVscodeDirUri();
+        if (vscodeDirUri) {
+            await vscode.workspace.fs.createDirectory(vscodeDirUri);
+        }
+        await vscode.workspace.fs.writeFile(this.configUri, Buffer.from(content, 'utf8'));
 
         // Auto-generate tasks.json if enabled
         if (this.config.settings.autoGenerateTasksJson) {
@@ -103,6 +178,59 @@ export class ConfigManager {
      */
     getProfile(id: string): Profile | undefined {
         return this.getAllProfiles().find(p => p.id === id);
+    }
+
+    getRemotes(): RemoteConfig[] {
+        return this.config?.remotes || [createLocalRemote()];
+    }
+
+    getRemote(id?: string): RemoteConfig {
+        const remoteId = normalizeRemoteId(id);
+        return this.getRemotes().find(remote => remote.id === remoteId) || createLocalRemote();
+    }
+
+    getTaskRemote(task: TerminalTaskItem): RemoteConfig {
+        return this.getRemote(task.remoteId);
+    }
+
+    async addRemote(remote: Omit<RemoteConfig, 'id'> & { id?: string }): Promise<RemoteConfig> {
+        const config = await this.getConfig();
+        const baseId = this.sanitizeRemoteId(remote.id || remote.host || remote.label);
+        let id = baseId || `remote_${Date.now()}`;
+        let suffix = 2;
+
+        const duplicate = config.remotes.find(existing =>
+            existing.type === remote.type && (
+                existing.host?.toLowerCase() === remote.host?.toLowerCase() ||
+                existing.id.toLowerCase() === id.toLowerCase() ||
+                existing.label.toLowerCase() === remote.label.toLowerCase()
+            )
+        );
+        if (duplicate) {
+            throw new Error(`Remote "${duplicate.label}" already exists`);
+        }
+
+        while (config.remotes.some(existing => existing.id === id)) {
+            id = `${baseId}_${suffix++}`;
+        }
+
+        const newRemote: RemoteConfig = {
+            ...remote,
+            id,
+            label: remote.label || remote.host || id
+        };
+
+        config.remotes.push(newRemote);
+        await this.saveConfig();
+        return newRemote;
+    }
+
+    private sanitizeRemoteId(value: string): string {
+        return value
+            .trim()
+            .replace(/^[^a-zA-Z0-9]+/, '')
+            .replace(/[^a-zA-Z0-9_-]/g, '_')
+            .substring(0, 50);
     }
 
     /**
@@ -450,12 +578,11 @@ export class ConfigManager {
      */
     async generateTasksJson(): Promise<void> {
         const config = await this.getConfig();
-        const workspaceFolder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        if (!workspaceFolder) {
+        const tasksJsonUri = this.getTasksJsonUri();
+        if (!tasksJsonUri) {
             return;
         }
 
-        const tasksJsonPath = path.join(workspaceFolder, '.vscode', 'tasks.json');
         const flatTasks = this.flattenTasks();
 
         interface VscodeTask {
@@ -484,9 +611,7 @@ export class ConfigManager {
         // Generate individual tasks
         for (const flatTask of flatTasks) {
             const task = flatTask.task;
-            const profile = this.getProfile(task.profileId || config.defaultProfileId) || BUILTIN_PROFILES[0];
-            const merged = this.mergeProfileWithOverrides(profile, task.overrides);
-            const generated = this.generateCommand(task.path, task.name, merged);
+            const generated = this.generateTaskCommand(task);
 
             const vscodeTask: VscodeTask = {
                 label: task.name,
@@ -528,7 +653,11 @@ export class ConfigManager {
             tasks
         };
 
-        fs.writeFileSync(tasksJsonPath, JSON.stringify(tasksJson, null, 2), 'utf8');
+        const vscodeDirUri = this.getVscodeDirUri();
+        if (vscodeDirUri) {
+            await vscode.workspace.fs.createDirectory(vscodeDirUri);
+        }
+        await vscode.workspace.fs.writeFile(tasksJsonUri, Buffer.from(JSON.stringify(tasksJson, null, 2), 'utf8'));
     }
 
     /**
@@ -556,6 +685,12 @@ export class ConfigManager {
         const config = this.config!;
         const profile = this.getProfile(task.profileId || config.defaultProfileId) || BUILTIN_PROFILES[0];
         const merged = this.mergeProfileWithOverrides(profile, task.overrides);
+        const remote = this.getTaskRemote(task);
+        if (remote.type === 'ssh') {
+            const sessionName = this.sanitizeSessionName(merged.tmux?.sessionName || merged.zellij?.sessionName || task.name);
+            const remoteCommand = this.buildBashCommand(task.path, sessionName, merged);
+            return { command: buildSshCommand(remote, remoteCommand, true) };
+        }
         return this.generateCommand(task.path, task.name, merged);
     }
 
@@ -565,9 +700,7 @@ export class ConfigManager {
 
         // Sanitize session name for multiplexer (alphanumeric, underscores, dashes only)
         // Check both tmux and zellij session names (they're mutually exclusive)
-        const sessionName = (profile.tmux?.sessionName || profile.zellij?.sessionName || taskName)
-            .replace(/[^a-zA-Z0-9_-]/g, '_')
-            .substring(0, 50);
+        const sessionName = this.sanitizeSessionName(profile.tmux?.sessionName || profile.zellij?.sessionName || taskName);
 
         let command = '';
         let shellOptions: { executable?: string; args?: string[] } | undefined;
@@ -575,8 +708,8 @@ export class ConfigManager {
         // Build command based on shell type
         switch (profile.shellType) {
             case 'wsl':
-                if (this.isRemoteWSL()) {
-                    // Already in WSL, just cd
+                if (!this.isWindows()) {
+                    // Remote hosts and native Unix-like systems run shell commands directly.
                     command = this.buildBashCommand(wslPath, sessionName, profile);
                 } else {
                     // On Windows, use wsl.exe
@@ -591,8 +724,12 @@ export class ConfigManager {
                 break;
 
             case 'wsl-bash':
-                command = `wsl.exe -e bash -c "${this.buildBashCommand(wslPath, sessionName, profile).replace(/"/g, '\\"')}"`;
-                shellOptions = { executable: 'cmd.exe', args: ['/C'] };
+                if (!this.isWindows()) {
+                    command = this.buildBashCommand(wslPath, sessionName, profile);
+                } else {
+                    command = `wsl.exe -e bash -c "${this.buildBashCommand(wslPath, sessionName, profile).replace(/"/g, '\\"')}"`;
+                    shellOptions = { executable: 'cmd.exe', args: ['/C'] };
+                }
                 break;
 
             case 'powershell':
@@ -647,7 +784,7 @@ export class ConfigManager {
         }
 
         // CD to directory
-        parts.push(`cd '${folderPath}'`);
+        parts.push(`cd ${shellQuote(folderPath)}`);
 
         // Post-commands
         if (profile.postCommands?.length) {
@@ -683,19 +820,19 @@ export class ConfigManager {
         switch (mode) {
             case 'attach-or-create':
                 // This matches your t() function: attach if exists, create if not
-                return `tmux new-session -A -s '${sessionName}'`;
+                return `tmux new-session -A -s ${shellQuote(sessionName)}`;
 
             case 'always-new':
-                return `tmux new-session -s '${sessionName}'`;
+                return `tmux new-session -s ${shellQuote(sessionName)}`;
 
             case 'attach-only':
-                return `tmux attach-session -t '${sessionName}' || echo 'Session ${sessionName} not found'`;
+                return `tmux attach-session -t ${shellQuote(sessionName)} || echo ${shellQuote(`Session ${sessionName} not found`)}`;
 
             case 'custom':
                 return profile.tmux.customCommand || 'tmux';
 
             default:
-                return `tmux new-session -A -s '${sessionName}'`;
+                return `tmux new-session -A -s ${shellQuote(sessionName)}`;
         }
     }
 
@@ -714,29 +851,31 @@ export class ConfigManager {
             case 'attach-or-create':
                 // Zellij doesn't have a single command like tmux -A,
                 // so we use attach with fallback to new session
-                return `zellij attach '${sessionName}' 2>/dev/null || zellij -s '${sessionName}'`;
+                return `zellij attach ${shellQuote(sessionName)} 2>/dev/null || zellij -s ${shellQuote(sessionName)}`;
 
             case 'always-new':
-                return `zellij -s '${sessionName}'`;
+                return `zellij -s ${shellQuote(sessionName)}`;
 
             case 'attach-only':
-                return `zellij attach '${sessionName}' || echo 'Session ${sessionName} not found'`;
+                return `zellij attach ${shellQuote(sessionName)} || echo ${shellQuote(`Session ${sessionName} not found`)}`;
 
             default:
-                return `zellij attach '${sessionName}' 2>/dev/null || zellij -s '${sessionName}'`;
+                return `zellij attach ${shellQuote(sessionName)} 2>/dev/null || zellij -s ${shellQuote(sessionName)}`;
         }
+    }
+
+    private sanitizeSessionName(name: string): string {
+        return name
+            .replace(/[^a-zA-Z0-9_-]/g, '_')
+            .substring(0, 50);
     }
 
     // =========================================================================
     // PATH UTILITIES
     // =========================================================================
 
-    private isRemoteWSL(): boolean {
-        return vscode.env.remoteName === 'wsl';
-    }
-
     private isWindows(): boolean {
-        if (this.isRemoteWSL()) {
+        if (vscode.env.remoteName) {
             return false;
         }
         return process.platform === 'win32';

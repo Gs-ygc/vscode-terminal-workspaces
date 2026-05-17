@@ -1,12 +1,19 @@
 import * as vscode from 'vscode';
 import { ConfigManager } from './configManager';
-import { TaskItem, TerminalTaskItem, TaskFolder, Profile, TmuxMode, ZellijMode, BUILTIN_PROFILES } from './types';
+import { TaskItem, TerminalTaskItem, TaskFolder, Profile, RemoteConfig, TmuxMode, ZellijMode, BUILTIN_PROFILES } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
 import { ZellijManager, ZellijSession } from './zellijManager';
+import { LOCAL_REMOTE_ID, normalizeRemoteId } from './remoteUtils';
 
 // Special marker types for tree items
+export interface RemoteHeader {
+    type: 'remoteHeader';
+    remote: RemoteConfig;
+}
+
 export interface TmuxSessionsHeader {
     type: 'tmuxSessionsHeader';
+    remoteId?: string;
 }
 
 export interface TmuxSessionData {
@@ -16,6 +23,7 @@ export interface TmuxSessionData {
 
 export interface ZellijSessionsHeader {
     type: 'zellijSessionsHeader';
+    remoteId?: string;
 }
 
 export interface ZellijSessionData {
@@ -23,21 +31,23 @@ export interface ZellijSessionData {
     session: ZellijSession;
 }
 
-export type TreeItemData = TaskItem | TmuxSessionsHeader | TmuxSessionData | ZellijSessionsHeader | ZellijSessionData;
+export type TreeItemData = TaskItem | RemoteHeader | TmuxSessionsHeader | TmuxSessionData | ZellijSessionsHeader | ZellijSessionData;
 
 export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<TaskTreeItem | undefined | null | void> = new vscode.EventEmitter<TaskTreeItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<TaskTreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    private cachedUntrackedTmuxSessions: TmuxSession[] = [];
-    private cachedUntrackedZellijSessions: ZellijSession[] = [];
+    private cachedUntrackedTmuxSessions: Map<string, TmuxSession[]> = new Map();
+    private cachedUntrackedZellijSessions: Map<string, ZellijSession[]> = new Map();
+    private allTmuxSessions: Map<string, TmuxSession[]> = new Map();
+    private allZellijSessions: Map<string, ZellijSession[]> = new Map();
 
     // Cache of active tmux session names (refreshed on each tree refresh)
     // Used to verify if a tmux session actually exists vs just a VS Code terminal
-    private activeTmuxSessions: Set<string> = new Set();
+    private activeTmuxSessions: Map<string, Set<string>> = new Map();
 
     // Cache of active zellij session names (refreshed on each tree refresh)
-    private activeZellijSessions: Set<string> = new Set();
+    private activeZellijSessions: Map<string, Set<string>> = new Map();
 
     // Parent map for getParent() support (needed for drag-and-drop)
     // Maps child item ID → parent TaskTreeItem (undefined means root)
@@ -64,6 +74,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     }
 
     refresh(): void {
+        this.cachedUntrackedTmuxSessions.clear();
+        this.cachedUntrackedZellijSessions.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -71,7 +83,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * Refresh tmux sessions specifically
      */
     refreshTmuxSessions(): void {
-        this.cachedUntrackedTmuxSessions = []; // Clear cache to force refresh
+        this.cachedUntrackedTmuxSessions.clear(); // Clear cache to force refresh
         this._onDidChangeTreeData.fire();
     }
 
@@ -79,7 +91,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * Refresh zellij sessions specifically
      */
     refreshZellijSessions(): void {
-        this.cachedUntrackedZellijSessions = []; // Clear cache to force refresh
+        this.cachedUntrackedZellijSessions.clear(); // Clear cache to force refresh
         this._onDidChangeTreeData.fire();
     }
 
@@ -93,23 +105,38 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         if (!element) {
             // Root level - refresh the active multiplexer sessions cache
             // This ensures we check actual tmux/zellij session state, not just VS Code terminal existence
-            this.refreshActiveSessionsCache();
+            const remotes = config.remotes || this.configManager.getRemotes();
+            this.refreshActiveSessionsCache(remotes);
 
             // Clear parent map on root refresh (rebuilt as tree items are created)
             this.parentMap.clear();
 
+            if (this.shouldGroupByRemote(config.items, remotes)) {
+                const remoteItems = remotes.map(remote => this.createRemoteHeader(remote));
+                if (remoteItems.length === 0) {
+                    return [this.createPlaceholderItem()];
+                }
+                for (const treeItem of remoteItems) {
+                    if (treeItem.id) {
+                        this.parentMap.set(treeItem.id, undefined);
+                    }
+                }
+                return remoteItems;
+            }
+
             const items: TaskTreeItem[] = [];
+            const localRemoteId = LOCAL_REMOTE_ID;
 
             // Check for untracked tmux sessions
-            const untrackedTmuxSessions = this.getUntrackedTmuxSessions();
+            const untrackedTmuxSessions = this.getUntrackedTmuxSessions(localRemoteId);
             if (untrackedTmuxSessions.length > 0) {
-                items.push(this.createTmuxSessionsHeader(untrackedTmuxSessions.length));
+                items.push(this.createTmuxSessionsHeader(untrackedTmuxSessions.length, localRemoteId));
             }
 
             // Check for untracked zellij sessions
-            const untrackedZellijSessions = this.getUntrackedZellijSessions();
+            const untrackedZellijSessions = this.getUntrackedZellijSessions(localRemoteId);
             if (untrackedZellijSessions.length > 0) {
-                items.push(this.createZellijSessionsHeader(untrackedZellijSessions.length));
+                items.push(this.createZellijSessionsHeader(untrackedZellijSessions.length, localRemoteId));
             }
 
             // Regular tasks
@@ -118,7 +145,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
                 return [this.createPlaceholderItem()];
             }
 
-            const configTreeItems = this.itemsToTreeItems(config.items);
+            const configTreeItems = this.itemsToTreeItems(config.items, false, localRemoteId);
             // Register root-level items in parent map (undefined = root)
             for (const treeItem of configTreeItems) {
                 if (treeItem.id) {
@@ -129,14 +156,52 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             return items;
         }
 
+        if (element.itemData && 'type' in element.itemData && element.itemData.type === 'remoteHeader') {
+            const remote = (element.itemData as RemoteHeader).remote;
+            const remoteId = normalizeRemoteId(remote.id);
+            const items: TaskTreeItem[] = [];
+
+            const untrackedTmuxSessions = this.getUntrackedTmuxSessions(remoteId);
+            if (untrackedTmuxSessions.length > 0) {
+                const header = this.createTmuxSessionsHeader(untrackedTmuxSessions.length, remoteId);
+                if (header.id) {
+                    this.parentMap.set(header.id, element);
+                }
+                items.push(header);
+            }
+
+            let untrackedZellijSessions = this.getUntrackedZellijSessions(remoteId);
+            if (this.showActiveOnly) {
+                untrackedZellijSessions = untrackedZellijSessions.filter(s => !s.exited);
+            }
+            if (untrackedZellijSessions.length > 0) {
+                const header = this.createZellijSessionsHeader(untrackedZellijSessions.length, remoteId);
+                if (header.id) {
+                    this.parentMap.set(header.id, element);
+                }
+                items.push(header);
+            }
+
+            const taskItems = this.itemsToTreeItems(this.filterItemsForRemote(config.items, remoteId), false, remoteId);
+            for (const child of taskItems) {
+                if (child.id) {
+                    this.parentMap.set(child.id, element);
+                }
+            }
+            items.push(...taskItems);
+            return items;
+        }
+
         // Children of tmux sessions header
         if (element.itemData && 'type' in element.itemData && element.itemData.type === 'tmuxSessionsHeader') {
-            return this.getUntrackedTmuxSessions().map(session => this.createTmuxSessionItem(session));
+            const remoteId = normalizeRemoteId((element.itemData as TmuxSessionsHeader).remoteId);
+            return this.getUntrackedTmuxSessions(remoteId).map(session => this.createTmuxSessionItem(session));
         }
 
         // Children of zellij sessions header
         if (element.itemData && 'type' in element.itemData && element.itemData.type === 'zellijSessionsHeader') {
-            let sessions = this.getUntrackedZellijSessions();
+            const remoteId = normalizeRemoteId((element.itemData as ZellijSessionsHeader).remoteId);
+            let sessions = this.getUntrackedZellijSessions(remoteId);
             // When filter is active, hide EXITED sessions
             if (this.showActiveOnly) {
                 sessions = sessions.filter(s => !s.exited);
@@ -147,7 +212,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         // Children of a folder
         if (element.itemData?.type === 'folder') {
             const folder = element.itemData as TaskFolder;
-            const childItems = this.itemsToTreeItems(folder.children, true);
+            const remoteId = this.remoteIdFromTreeId(element.id);
+            const childItems = this.itemsToTreeItems(folder.children, true, remoteId);
             // Register folder children in parent map
             for (const child of childItems) {
                 if (child.id) {
@@ -163,12 +229,21 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     /**
      * Get untracked tmux sessions (sessions not mapped to tasks)
      */
-    getUntrackedTmuxSessions(): TmuxSession[] {
+    getUntrackedTmuxSessions(remoteId: string = LOCAL_REMOTE_ID): TmuxSession[] {
+        remoteId = normalizeRemoteId(remoteId);
+        const cached = this.cachedUntrackedTmuxSessions.get(remoteId);
+        if (cached) {
+            return cached;
+        }
+
         // Get all task names that might be tmux sessions
         const flatTasks = this.configManager.flattenTasks();
         const trackedNames: string[] = [];
 
         for (const ft of flatTasks) {
+            if (normalizeRemoteId(ft.task.remoteId) !== remoteId) {
+                continue;
+            }
             // Check if task uses tmux
             const profile = this.configManager.getProfile(ft.task.profileId || 'wsl-default');
             if (profile?.tmux?.enabled === true || ft.task.overrides?.tmux?.enabled === true) {
@@ -187,15 +262,23 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             }
         }
 
-        return TmuxManager.getUntrackedSessions(trackedNames);
+        const trackedSet = new Set(trackedNames.map(n => n.toLowerCase()));
+        const allSessions = this.allTmuxSessions.get(remoteId) || [];
+        const untracked = allSessions.filter(session =>
+            !trackedSet.has(session.name.toLowerCase())
+        );
+        this.cachedUntrackedTmuxSessions.set(remoteId, untracked);
+        return untracked;
     }
 
     /**
      * Get untracked zellij sessions (sessions not mapped to tasks)
      */
-    getUntrackedZellijSessions(): ZellijSession[] {
-        if (!ZellijManager.isAvailable()) {
-            return [];
+    getUntrackedZellijSessions(remoteId: string = LOCAL_REMOTE_ID): ZellijSession[] {
+        remoteId = normalizeRemoteId(remoteId);
+        const cached = this.cachedUntrackedZellijSessions.get(remoteId);
+        if (cached) {
+            return cached;
         }
 
         // Get all task names that might be zellij sessions
@@ -203,6 +286,9 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         const trackedNames: string[] = [];
 
         for (const ft of flatTasks) {
+            if (normalizeRemoteId(ft.task.remoteId) !== remoteId) {
+                continue;
+            }
             // Check if task uses zellij
             const profile = this.configManager.getProfile(ft.task.profileId || 'wsl-default');
             if (profile?.zellij?.enabled === true || ft.task.overrides?.zellij?.enabled === true) {
@@ -221,7 +307,13 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             }
         }
 
-        return ZellijManager.getUntrackedSessions(trackedNames);
+        const trackedSet = new Set(trackedNames.map(n => n.toLowerCase()));
+        const allSessions = this.allZellijSessions.get(remoteId) || [];
+        const untracked = allSessions.filter(session =>
+            !trackedSet.has(session.name.toLowerCase())
+        );
+        this.cachedUntrackedZellijSessions.set(remoteId, untracked);
+        return untracked;
     }
 
     getParent(element: TaskTreeItem): vscode.ProviderResult<TaskTreeItem> {
@@ -237,27 +329,41 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * Refresh the cache of active multiplexer sessions (tmux and zellij)
      * Called at the start of each tree refresh to ensure accurate state
      */
-    private refreshActiveSessionsCache(): void {
+    private refreshActiveSessionsCache(remotes: RemoteConfig[]): void {
         // Refresh tmux sessions
         this.activeTmuxSessions.clear();
-        try {
-            const tmuxSessions = TmuxManager.getSessions();
-            for (const session of tmuxSessions) {
-                this.activeTmuxSessions.add(session.name.toLowerCase());
+        this.allTmuxSessions.clear();
+        for (const remote of remotes) {
+            const remoteId = normalizeRemoteId(remote.id);
+            const active = new Set<string>();
+            try {
+                const sessions = TmuxManager.getSessions(remote);
+                this.allTmuxSessions.set(remoteId, sessions);
+                for (const session of sessions) {
+                    active.add(session.name.toLowerCase());
+                }
+            } catch {
+                this.allTmuxSessions.set(remoteId, []);
             }
-        } catch {
-            // If tmux isn't available or fails, cache stays empty
+            this.activeTmuxSessions.set(remoteId, active);
         }
 
         // Refresh zellij sessions
         this.activeZellijSessions.clear();
-        try {
-            const zellijSessions = ZellijManager.getSessions();
-            for (const session of zellijSessions) {
-                this.activeZellijSessions.add(session.name.toLowerCase());
+        this.allZellijSessions.clear();
+        for (const remote of remotes) {
+            const remoteId = normalizeRemoteId(remote.id);
+            const active = new Set<string>();
+            try {
+                const sessions = ZellijManager.getSessions(remote);
+                this.allZellijSessions.set(remoteId, sessions);
+                for (const session of sessions) {
+                    active.add(session.name.toLowerCase());
+                }
+            } catch {
+                this.allZellijSessions.set(remoteId, []);
             }
-        } catch {
-            // If zellij isn't available or fails, cache stays empty
+            this.activeZellijSessions.set(remoteId, active);
         }
     }
 
@@ -267,14 +373,15 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * @param sanitizedSessionName - Optional sanitized session name (for tmux/zellij) to also check
      * @param multiplexer - Which multiplexer this task uses ('tmux', 'zellij', or undefined for none)
      */
-    private isTerminalActive(taskName: string, sanitizedSessionName?: string, multiplexer?: 'tmux' | 'zellij'): boolean {
+    private isTerminalActive(taskName: string, sanitizedSessionName?: string, multiplexer?: 'tmux' | 'zellij', remoteId: string = LOCAL_REMOTE_ID): boolean {
+        remoteId = normalizeRemoteId(remoteId);
         // For multiplexer tasks, we need BOTH:
         // 1. A VS Code terminal to exist (so we can show it)
         // 2. The actual session to exist (so it's not a dead/ended session)
         if (multiplexer && sanitizedSessionName) {
             const sessionExists = multiplexer === 'tmux'
-                ? this.activeTmuxSessions.has(sanitizedSessionName.toLowerCase())
-                : this.activeZellijSessions.has(sanitizedSessionName.toLowerCase());
+                ? this.activeTmuxSessions.get(remoteId)?.has(sanitizedSessionName.toLowerCase())
+                : this.activeZellijSessions.get(remoteId)?.has(sanitizedSessionName.toLowerCase());
             if (!sessionExists) {
                 return false; // session is dead, don't show as active
             }
@@ -284,17 +391,20 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         return terminals.some(terminal => {
             // Match exact name or "Task: name" format from VS Code tasks
             const terminalName = terminal.name;
-            const matches = terminalName === taskName ||
+            const localNameMatches = remoteId === LOCAL_REMOTE_ID && (
+                   terminalName === taskName ||
                    terminalName === `Task - ${taskName}` ||
-                   terminalName === `tmux: ${taskName}` ||
-                   terminalName === `zellij: ${taskName}` ||
-                   terminalName.startsWith(`${taskName} `);
+                   terminalName.startsWith(`${taskName} `)
+            );
+            const matches = localNameMatches ||
+                   terminalName === this.getSessionTerminalName('tmux', taskName, remoteId) ||
+                   terminalName === this.getSessionTerminalName('zellij', taskName, remoteId);
 
             // Also check sanitized session name if provided
             if (!matches && sanitizedSessionName && sanitizedSessionName !== taskName) {
-                return terminalName === `tmux: ${sanitizedSessionName}` ||
-                       terminalName === `zellij: ${sanitizedSessionName}` ||
-                       terminalName === sanitizedSessionName;
+                return terminalName === this.getSessionTerminalName('tmux', sanitizedSessionName, remoteId) ||
+                       terminalName === this.getSessionTerminalName('zellij', sanitizedSessionName, remoteId) ||
+                       (remoteId === LOCAL_REMOTE_ID && terminalName === sanitizedSessionName);
             }
 
             return matches;
@@ -304,11 +414,11 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     /**
      * Check if there's an active terminal for a tmux session
      */
-    private isTmuxTerminalActive(sessionName: string): boolean {
+    private isTmuxTerminalActive(sessionName: string, remoteId: string = LOCAL_REMOTE_ID): boolean {
         const terminals = vscode.window.terminals;
         return terminals.some(terminal => {
             const terminalName = terminal.name;
-            return terminalName === `tmux: ${sessionName}`;
+            return terminalName === this.getSessionTerminalName('tmux', sessionName, remoteId);
         });
     }
 
@@ -318,32 +428,38 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * @param multiplexer - Which multiplexer to check ('tmux' or 'zellij')
      * @returns true if the session exists in the background
      */
-    private doesSessionExist(sessionName: string, multiplexer: 'tmux' | 'zellij'): boolean {
+    private doesSessionExist(sessionName: string, multiplexer: 'tmux' | 'zellij', remoteId: string = LOCAL_REMOTE_ID): boolean {
+        remoteId = normalizeRemoteId(remoteId);
         // Check against the raw session name (cache stores raw names from tmux/zellij, lowercased)
         if (multiplexer === 'tmux') {
-            return this.activeTmuxSessions.has(sessionName.toLowerCase());
+            return this.activeTmuxSessions.get(remoteId)?.has(sessionName.toLowerCase()) || false;
         } else {
-            return this.activeZellijSessions.has(sessionName.toLowerCase());
+            return this.activeZellijSessions.get(remoteId)?.has(sessionName.toLowerCase()) || false;
         }
     }
 
     /**
      * Check if there's a VS Code terminal attached to a session (without checking session existence)
      */
-    private isVSCodeTerminalAttached(taskName: string, sanitizedSessionName?: string): boolean {
+    private isVSCodeTerminalAttached(taskName: string, sanitizedSessionName?: string, remoteId: string = LOCAL_REMOTE_ID): boolean {
+        remoteId = normalizeRemoteId(remoteId);
         const terminals = vscode.window.terminals;
         return terminals.some(terminal => {
             const terminalName = terminal.name;
-            const matches = terminalName === taskName ||
+            const localNameMatches = remoteId === LOCAL_REMOTE_ID && (
+                   terminalName === taskName ||
                    terminalName === `Task - ${taskName}` ||
-                   terminalName === `tmux: ${taskName}` ||
-                   terminalName === `zellij: ${taskName}` ||
-                   terminalName.startsWith(`${taskName} `);
+                   terminalName.startsWith(`${taskName} `)
+            );
+            const matches = localNameMatches ||
+                   terminalName === this.getTaskTerminalName(taskName, remoteId) ||
+                   terminalName === this.getSessionTerminalName('tmux', taskName, remoteId) ||
+                   terminalName === this.getSessionTerminalName('zellij', taskName, remoteId);
 
             if (!matches && sanitizedSessionName && sanitizedSessionName !== taskName) {
-                return terminalName === `tmux: ${sanitizedSessionName}` ||
-                       terminalName === `zellij: ${sanitizedSessionName}` ||
-                       terminalName === sanitizedSessionName;
+                return terminalName === this.getSessionTerminalName('tmux', sanitizedSessionName, remoteId) ||
+                       terminalName === this.getSessionTerminalName('zellij', sanitizedSessionName, remoteId) ||
+                       (remoteId === LOCAL_REMOTE_ID && terminalName === sanitizedSessionName);
             }
 
             return matches;
@@ -354,11 +470,12 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      * Check if a task or folder has any active terminals/sessions.
      * Used by the "show active only" filter.
      */
-    private isItemActive(item: TaskItem): boolean {
+    private isItemActive(item: TaskItem, remoteId: string = LOCAL_REMOTE_ID): boolean {
         if (item.type === 'folder') {
-            return item.children.some(child => this.isItemActive(child));
+            return item.children.some(child => this.isItemActive(child, remoteId));
         }
 
+        remoteId = normalizeRemoteId(item.remoteId);
         // Task: check for active session or terminal
         const profile = this.configManager.getProfile(item.profileId || 'wsl-default');
         const isTmux = profile?.tmux?.enabled || item.overrides?.tmux?.enabled;
@@ -367,32 +484,32 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         if (isTmux) {
             const rawSessionName = item.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || item.name;
             const sanitized = rawSessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
-            return this.doesSessionExist(rawSessionName, 'tmux') || this.isVSCodeTerminalAttached(item.name, sanitized);
+            return this.doesSessionExist(rawSessionName, 'tmux', remoteId) || this.isVSCodeTerminalAttached(item.name, sanitized, remoteId);
         } else if (isZellij) {
             const rawSessionName = item.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || item.name;
             const sanitized = rawSessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
-            return this.doesSessionExist(rawSessionName, 'zellij') || this.isVSCodeTerminalAttached(item.name, sanitized);
+            return this.doesSessionExist(rawSessionName, 'zellij', remoteId) || this.isVSCodeTerminalAttached(item.name, sanitized, remoteId);
         } else {
-            return this.isVSCodeTerminalAttached(item.name);
+            return this.isVSCodeTerminalAttached(item.name, undefined, remoteId);
         }
     }
 
-    private itemsToTreeItems(items: TaskItem[], isChild: boolean = false): TaskTreeItem[] {
+    private itemsToTreeItems(items: TaskItem[], isChild: boolean = false, remoteId: string = LOCAL_REMOTE_ID): TaskTreeItem[] {
         // Apply active-only filter if enabled
         const filteredItems = this.showActiveOnly
-            ? items.filter(item => this.isItemActive(item))
+            ? items.filter(item => this.isItemActive(item, remoteId))
             : items;
 
         return filteredItems.map(item => {
             if (item.type === 'folder') {
-                return this.createFolderItem(item, isChild);
+                return this.createFolderItem(item, isChild, remoteId);
             } else {
-                return this.createTaskItem(item, isChild);
+                return this.createTaskItem(item, isChild, remoteId);
             }
         });
     }
 
-    private createFolderItem(folder: TaskFolder, isChild: boolean = false): TaskTreeItem {
+    private createFolderItem(folder: TaskFolder, isChild: boolean = false, remoteId: string = LOCAL_REMOTE_ID): TaskTreeItem {
         const item = new TaskTreeItem(
             folder.name,
             folder.expanded !== false
@@ -402,7 +519,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         );
 
         // Set unique ID to preserve expansion state across refreshes
-        item.id = `folder-${folder.id}`;
+        item.id = `folder-${normalizeRemoteId(remoteId)}::${folder.id}`;
         // Use symbol-folder icon - narrower than 'folder' for consistent alignment
         item.iconPath = new vscode.ThemeIcon('archive', new vscode.ThemeColor('terminal.ansiBlue'));
         // Use different context values for empty vs non-empty folders
@@ -418,7 +535,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         return item;
     }
 
-    private createTaskItem(task: TerminalTaskItem, isChild: boolean = false): TaskTreeItem {
+    private createTaskItem(task: TerminalTaskItem, isChild: boolean = false, remoteId: string = LOCAL_REMOTE_ID): TaskTreeItem {
         const item = new TaskTreeItem(
             task.name,
             vscode.TreeItemCollapsibleState.None,
@@ -426,7 +543,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         );
 
         // Set unique ID to preserve state across refreshes
-        item.id = `task-${task.id}`;
+        remoteId = normalizeRemoteId(task.remoteId || remoteId);
+        item.id = `task-${remoteId}::${task.id}`;
 
         // Get the profile for this task
         const profile = this.configManager.getProfile(task.profileId || 'wsl-default');
@@ -467,8 +585,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             // Multiplexer task - check both session existence and terminal attachment
             // Use rawSessionName for session existence (matches cache which stores raw names)
             // Use sanitizedSessionName for terminal matching (terminals use sanitized names)
-            hasActiveSession = this.doesSessionExist(rawSessionName, multiplexer);
-            hasVSCodeTerminal = this.isVSCodeTerminalAttached(task.name, sanitizedSessionName);
+            hasActiveSession = this.doesSessionExist(rawSessionName, multiplexer, remoteId);
+            hasVSCodeTerminal = this.isVSCodeTerminalAttached(task.name, sanitizedSessionName, remoteId);
 
             if (hasActiveSession && hasVSCodeTerminal) {
                 // Green: Session exists AND terminal is attached
@@ -482,7 +600,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             }
         } else {
             // Non-multiplexer task - simple terminal check
-            hasVSCodeTerminal = this.isVSCodeTerminalAttached(task.name);
+            hasVSCodeTerminal = this.isVSCodeTerminalAttached(task.name, undefined, remoteId);
             iconColor = hasVSCodeTerminal
                 ? new vscode.ThemeColor('terminal.ansiGreen')
                 : new vscode.ThemeColor('disabledForeground');
@@ -537,15 +655,34 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         return item;
     }
 
-    private createTmuxSessionsHeader(count: number): TaskTreeItem {
+    private createRemoteHeader(remote: RemoteConfig): TaskTreeItem {
+        const item = new TaskTreeItem(
+            remote.label,
+            vscode.TreeItemCollapsibleState.Expanded,
+            { type: 'remoteHeader', remote } as RemoteHeader
+        );
+
+        item.id = `remote-${remote.id}`;
+        item.iconPath = new vscode.ThemeIcon(remote.type === 'ssh' ? 'server-environment' : 'device-desktop');
+        item.contextValue = 'remoteHeader';
+        item.description = remote.type === 'ssh' ? remote.host : 'local';
+        item.tooltip = remote.type === 'ssh'
+            ? `SSH: ${remote.host}`
+            : 'Local extension host';
+
+        return item;
+    }
+
+    private createTmuxSessionsHeader(count: number, remoteId: string = LOCAL_REMOTE_ID): TaskTreeItem {
+        remoteId = normalizeRemoteId(remoteId);
         const item = new TaskTreeItem(
             `Untracked Sessions (${count})`,
             vscode.TreeItemCollapsibleState.Collapsed,
-            { type: 'tmuxSessionsHeader' } as TmuxSessionsHeader
+            { type: 'tmuxSessionsHeader', remoteId } as TmuxSessionsHeader
         );
 
         // Set unique ID to preserve expansion state
-        item.id = 'tmux-sessions-header';
+        item.id = `tmux-sessions-header-${remoteId}`;
         // Use a distinct icon with color to differentiate from regular folders
         item.iconPath = new vscode.ThemeIcon('broadcast', new vscode.ThemeColor('terminal.ansiYellow'));
         item.contextValue = 'tmuxSessionsHeader';
@@ -556,6 +693,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     }
 
     private createTmuxSessionItem(session: TmuxSession): TaskTreeItem {
+        const remoteId = normalizeRemoteId(session.remoteId);
         const item = new TaskTreeItem(
             session.name,
             vscode.TreeItemCollapsibleState.None,
@@ -563,10 +701,10 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         );
 
         // Set unique ID to preserve state across refreshes
-        item.id = `tmux-session-${session.name}`;
+        item.id = `tmux-session-${remoteId}-${session.name}`;
 
         // Check if there's an active terminal attached to this tmux session
-        const isActive = this.isTerminalActive(session.name) || this.isTmuxTerminalActive(session.name);
+        const isActive = this.isTerminalActive(session.name, undefined, undefined, remoteId) || this.isTmuxTerminalActive(session.name, remoteId);
         const iconColor = isActive
             ? new vscode.ThemeColor('terminal.ansiGreen')
             : new vscode.ThemeColor('disabledForeground');
@@ -580,31 +718,28 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             `Status: ${session.attached ? 'Attached' : 'Detached'}`,
             `Created: ${session.created.toLocaleString()}`,
             '',
-            'Right-click to attach or import as task'
+            'Click to focus or attach. Right-click to import as task.'
         ].join('\n');
 
-        // Only attach on click if setting is enabled
-        const clickToAttach = vscode.workspace.getConfiguration('terminalWorkspaces').get<boolean>('tmuxClickToAttach', false);
-        if (clickToAttach) {
-            item.command = {
-                command: 'terminalWorkspaces.attachTmuxSession',
-                title: 'Attach to Session',
-                arguments: [session]
-            };
-        }
+        item.command = {
+            command: 'terminalWorkspaces.attachTmuxSession',
+            title: 'Attach to Session',
+            arguments: [session]
+        };
 
         return item;
     }
 
-    private createZellijSessionsHeader(count: number): TaskTreeItem {
+    private createZellijSessionsHeader(count: number, remoteId: string = LOCAL_REMOTE_ID): TaskTreeItem {
+        remoteId = normalizeRemoteId(remoteId);
         const item = new TaskTreeItem(
             `Untracked Sessions (${count})`,
             vscode.TreeItemCollapsibleState.Collapsed,
-            { type: 'zellijSessionsHeader' } as ZellijSessionsHeader
+            { type: 'zellijSessionsHeader', remoteId } as ZellijSessionsHeader
         );
 
         // Set unique ID to preserve expansion state
-        item.id = 'zellij-sessions-header';
+        item.id = `zellij-sessions-header-${remoteId}`;
         // Use a distinct icon with color to differentiate from regular folders
         item.iconPath = new vscode.ThemeIcon('broadcast', new vscode.ThemeColor('terminal.ansiCyan'));
         item.contextValue = 'zellijSessionsHeader';
@@ -615,6 +750,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     }
 
     private createZellijSessionItem(session: ZellijSession): TaskTreeItem {
+        const remoteId = normalizeRemoteId(session.remoteId);
         const item = new TaskTreeItem(
             session.name,
             vscode.TreeItemCollapsibleState.None,
@@ -622,7 +758,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         );
 
         // Set unique ID to preserve state across refreshes
-        item.id = `zellij-session-${session.name}`;
+        item.id = `zellij-session-${remoteId}-${session.name}`;
 
         if (session.exited) {
             // EXITED sessions: red indicator, warn about resurrection
@@ -638,7 +774,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             ].join('\n');
         } else {
             // Active/background sessions: green if terminal attached, grey otherwise
-            const isActive = this.isTerminalActive(session.name) || this.isZellijTerminalActive(session.name);
+            const isActive = this.isTerminalActive(session.name, undefined, undefined, remoteId) || this.isZellijTerminalActive(session.name, remoteId);
             const iconColor = isActive
                 ? new vscode.ThemeColor('terminal.ansiGreen')
                 : new vscode.ThemeColor('disabledForeground');
@@ -649,18 +785,14 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
                 `Session: ${session.name}`,
                 session.path ? `Path: ${session.path}` : '',
                 '',
-                'Right-click to attach or import as task'
+                'Click to focus or attach. Right-click to import as task.'
             ].filter(l => l).join('\n');
 
-            // Only attach on click if setting is enabled
-            const clickToAttach = vscode.workspace.getConfiguration('terminalWorkspaces').get<boolean>('zellijClickToAttach', false);
-            if (clickToAttach) {
-                item.command = {
-                    command: 'terminalWorkspaces.attachZellijSession',
-                    title: 'Attach to Session',
-                    arguments: [session]
-                };
-            }
+            item.command = {
+                command: 'terminalWorkspaces.attachZellijSession',
+                title: 'Attach to Session',
+                arguments: [session]
+            };
         }
 
         return item;
@@ -669,12 +801,70 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     /**
      * Check if there's an active terminal for a zellij session
      */
-    private isZellijTerminalActive(sessionName: string): boolean {
+    private isZellijTerminalActive(sessionName: string, remoteId: string = LOCAL_REMOTE_ID): boolean {
         const terminals = vscode.window.terminals;
         return terminals.some(terminal => {
             const terminalName = terminal.name;
-            return terminalName === `zellij: ${sessionName}`;
+            return terminalName === this.getSessionTerminalName('zellij', sessionName, remoteId);
         });
+    }
+
+    private shouldGroupByRemote(items: TaskItem[], remotes: RemoteConfig[]): boolean {
+        if (remotes.length > 1) {
+            return true;
+        }
+
+        return this.hasNonLocalTask(items);
+    }
+
+    private hasNonLocalTask(items: TaskItem[]): boolean {
+        return items.some(item => {
+            if (item.type === 'task') {
+                return normalizeRemoteId(item.remoteId) !== LOCAL_REMOTE_ID;
+            }
+            return this.hasNonLocalTask(item.children);
+        });
+    }
+
+    private filterItemsForRemote(items: TaskItem[], remoteId: string): TaskItem[] {
+        remoteId = normalizeRemoteId(remoteId);
+        const result: TaskItem[] = [];
+
+        for (const item of items) {
+            if (item.type === 'task') {
+                if (normalizeRemoteId(item.remoteId) === remoteId) {
+                    result.push(item);
+                }
+            } else {
+                const children = this.filterItemsForRemote(item.children, remoteId);
+                if (children.length > 0) {
+                    result.push({ ...item, children });
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private remoteIdFromTreeId(treeId?: string): string {
+        if (!treeId) {
+            return LOCAL_REMOTE_ID;
+        }
+
+        const match = treeId.match(/^(?:folder|task)-(.+)::/);
+        return match ? match[1] : LOCAL_REMOTE_ID;
+    }
+
+    private getTaskTerminalName(taskName: string, remoteId: string = LOCAL_REMOTE_ID): string {
+        remoteId = normalizeRemoteId(remoteId);
+        return remoteId === LOCAL_REMOTE_ID ? taskName : `${remoteId}: ${taskName}`;
+    }
+
+    private getSessionTerminalName(kind: 'tmux' | 'zellij', sessionName: string, remoteId: string = LOCAL_REMOTE_ID): string {
+        remoteId = normalizeRemoteId(remoteId);
+        return remoteId === LOCAL_REMOTE_ID
+            ? `${kind}: ${sessionName}`
+            : `${kind}@${remoteId}: ${sessionName}`;
     }
 
     private shortenPath(fullPath: string): string {
@@ -783,7 +973,8 @@ export class TerminalTasksDragAndDropController implements vscode.TreeDragAndDro
         // Reject drops onto session-related items
         if (targetData && 'type' in targetData) {
             const targetType = targetData.type;
-            if (targetType === 'tmuxSessionsHeader' || targetType === 'tmuxSession' ||
+            if (targetType === 'remoteHeader' ||
+                targetType === 'tmuxSessionsHeader' || targetType === 'tmuxSession' ||
                 targetType === 'zellijSessionsHeader' || targetType === 'zellijSession') {
                 return;
             }
@@ -843,6 +1034,28 @@ export class ProfileQuickPick {
     }
 }
 
+export class RemoteQuickPick {
+    static async show(configManager: ConfigManager, currentRemoteId?: string): Promise<RemoteConfig | undefined> {
+        const remotes = configManager.getRemotes();
+
+        const items: (vscode.QuickPickItem & { remote: RemoteConfig })[] = remotes.map(remote => ({
+            label: remote.label,
+            description: remote.type === 'ssh' ? remote.host : 'local',
+            detail: remote.id,
+            picked: normalizeRemoteId(currentRemoteId) === normalizeRemoteId(remote.id),
+            remote
+        }));
+
+        const selected = await vscode.window.showQuickPick(items, {
+            placeHolder: 'Select remote host',
+            matchOnDescription: true,
+            matchOnDetail: true
+        });
+
+        return selected?.remote;
+    }
+}
+
 // ============================================================================
 // FOLDER PICKER PROVIDER
 // ============================================================================
@@ -890,6 +1103,7 @@ export class FolderQuickPick {
 export interface TaskConfigResult {
     name: string;
     path: string;
+    remoteId?: string;
     profileId: string;
     tags?: string[];
     overrides?: {
@@ -911,7 +1125,8 @@ export class TaskConfigDialog {
     static async showCreate(
         configManager: ConfigManager,
         defaultPath: string,
-        defaultName: string
+        defaultName: string,
+        defaultRemoteId?: string
     ): Promise<TaskConfigResult | undefined> {
         // Step 1: Name
         const name = await vscode.window.showInputBox({
@@ -924,15 +1139,27 @@ export class TaskConfigDialog {
             return undefined;
         }
 
-        // Step 2: Profile selection
         const config = await configManager.getConfig();
+
+        // Step 2: Remote selection
+        const remote = defaultRemoteId
+            ? configManager.getRemote(defaultRemoteId)
+            : config.remotes.length > 1
+            ? await RemoteQuickPick.show(configManager, 'local')
+            : configManager.getRemote('local');
+
+        if (!remote) {
+            return undefined;
+        }
+
+        // Step 3: Profile selection
         const profile = await ProfileQuickPick.show(configManager, config.defaultProfileId);
 
         if (!profile) {
             return undefined;
         }
 
-        // Step 3: Optional - tmux session name (if tmux enabled)
+        // Step 4: Optional - tmux session name (if tmux enabled)
         let tmuxSessionName: string | undefined;
         if (profile.tmux?.enabled) {
             const customSession = await vscode.window.showInputBox({
@@ -946,7 +1173,7 @@ export class TaskConfigDialog {
             tmuxSessionName = customSession || undefined;
         }
 
-        // Step 4: Optional - tags
+        // Step 5: Optional - tags
         const tagsInput = await vscode.window.showInputBox({
             prompt: 'Tags (comma-separated, optional - press Enter to skip, ESC to cancel)',
             placeHolder: 'work, frontend, important'
@@ -964,6 +1191,7 @@ export class TaskConfigDialog {
         return {
             name,
             path: defaultPath,
+            remoteId: remote.id,
             profileId: profile.id,
             tags,
             overrides: tmuxSessionName ? {
@@ -981,6 +1209,7 @@ export class TaskConfigDialog {
         const actions = await vscode.window.showQuickPick([
             { label: '$(edit) Rename', action: 'rename' },
             { label: '$(folder-opened) Change folder', action: 'path' },
+            { label: '$(server-environment) Change remote', action: 'remote' },
             { label: '$(symbol-misc) Change profile', action: 'profile' },
             { label: '$(tag) Edit tags', action: 'tags' },
             { label: '$(settings-gear) Advanced settings', action: 'advanced' }
@@ -1016,6 +1245,11 @@ export class TaskConfigDialog {
             case 'profile': {
                 const profile = await ProfileQuickPick.show(configManager, task.profileId);
                 return profile ? { profileId: profile.id } : undefined;
+            }
+
+            case 'remote': {
+                const remote = await RemoteQuickPick.show(configManager, task.remoteId);
+                return remote ? { remoteId: remote.id } : undefined;
             }
 
             case 'tags': {

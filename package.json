@@ -2,7 +2,7 @@
   "name": "terminal-workspaces",
   "displayName": "Terminal Workspaces",
   "description": "Manage terminal sessions with a sidebar GUI. Supports WSL, tmux, Zellij, PowerShell, nested folders, profiles, and more. Perfect for multi-project and agentic coding workflows.",
-  "version": "0.7.0",
+  "version": "0.7.5",
   "publisher": "cybersader",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -39,8 +39,14 @@
     "session",
     "workflow"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "*"
+  ],
   "main": "./out/extension.js",
+  "extensionKind": [
+    "ui",
+    "workspace"
+  ],
   "contributes": {
     "viewsContainers": {
       "activitybar": [
@@ -64,7 +70,7 @@
     "viewsWelcome": [
       {
         "view": "terminalWorkspacesView",
-        "contents": "No terminal tasks configured.\n[Add Current File's Folder](command:terminalWorkspaces.addCurrentFileFolder)\n[Browse for Folder](command:terminalWorkspaces.addBrowseFolder)\n[Open Config](command:terminalWorkspaces.openConfig)"
+        "contents": "No terminal tasks configured.\n[Add Remote](command:terminalWorkspaces.addRemote)\n[Add Current File's Folder](command:terminalWorkspaces.addCurrentFileFolder)\n[Browse for Folder](command:terminalWorkspaces.addBrowseFolder)\n[Open Config](command:terminalWorkspaces.openConfig)"
       }
     ],
     "commands": [
@@ -81,6 +87,16 @@
       {
         "command": "terminalWorkspaces.addCurrentFileFolder",
         "title": "Terminal Workspaces: Add Task",
+        "icon": "$(add)"
+      },
+      {
+        "command": "terminalWorkspaces.addRemote",
+        "title": "Terminal Workspaces: Add Remote",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "terminalWorkspaces.addTaskToRemote",
+        "title": "Terminal Workspaces: Add Task to Remote",
         "icon": "$(add)"
       },
       {
@@ -323,14 +339,19 @@
           "group": "navigation@5"
         },
         {
+          "command": "terminalWorkspaces.addRemote",
+          "when": "view == terminalWorkspacesView",
+          "group": "navigation@6"
+        },
+        {
           "command": "terminalWorkspaces.toggleActiveFilter",
           "when": "view == terminalWorkspacesView && !terminalWorkspaces.showActiveOnly",
-          "group": "navigation@6"
+          "group": "navigation@7"
         },
         {
           "command": "terminalWorkspaces.toggleActiveFilterOff",
           "when": "view == terminalWorkspacesView && terminalWorkspaces.showActiveOnly",
-          "group": "navigation@6"
+          "group": "navigation@7"
         },
         {
           "command": "terminalWorkspaces.addBrowseFolder",
@@ -361,9 +382,24 @@
           "command": "terminalWorkspaces.openSettings",
           "when": "view == terminalWorkspacesView",
           "group": "overflow@6"
+        },
+        {
+          "command": "terminalWorkspaces.addRemote",
+          "when": "view == terminalWorkspacesView",
+          "group": "overflow@7"
         }
       ],
       "view/item/context": [
+        {
+          "command": "terminalWorkspaces.addTaskToRemote",
+          "when": "view == terminalWorkspacesView && viewItem == remoteHeader",
+          "group": "inline@1"
+        },
+        {
+          "command": "terminalWorkspaces.addTaskToRemote",
+          "when": "view == terminalWorkspacesView && viewItem == remoteHeader",
+          "group": "2_add@1"
+        },
         {
           "command": "terminalWorkspaces.runTask",
           "when": "view == terminalWorkspacesView && (viewItem == terminalTask || viewItem == terminalTaskTmuxActive || viewItem == terminalTaskZellijActive || viewItem == terminalTaskTmuxBackground || viewItem == terminalTaskZellijBackground)",
