@@ -125,7 +125,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             // Clear parent map on root refresh (rebuilt as tree items are created)
             this.parentMap.clear();
 
-            if (this.shouldGroupByRemote(config.items, remotes)) {
+            if (this.shouldGroupByRemote(config.items, remotes) || this.hasUntrackedSessions(remotes)) {
                 const remoteItems = remotes.map(remote => this.createRemoteHeader(remote));
                 if (remoteItems.length === 0) {
                     return [this.createPlaceholderItem()];
@@ -883,6 +883,14 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         }
 
         return this.hasNonLocalTask(items);
+    }
+
+    private hasUntrackedSessions(remotes: RemoteConfig[]): boolean {
+        return remotes.some(remote => {
+            const remoteId = normalizeRemoteId(remote.id);
+            return this.getUntrackedTmuxSessions(remoteId).length > 0 ||
+                this.getUntrackedZellijSessions(remoteId).length > 0;
+        });
     }
 
     private hasNonLocalTask(items: TaskItem[]): boolean {
