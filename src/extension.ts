@@ -242,7 +242,17 @@ export function activate(context: vscode.ExtensionContext) {
         dragAndDropController: dragAndDropController
     });
 
+    let allowSelectionOpen = false;
+    const selectionOpenReadyTimer = setTimeout(() => {
+        allowSelectionOpen = true;
+    }, 750);
+    context.subscriptions.push({ dispose: () => clearTimeout(selectionOpenReadyTimer) });
+
     const selectionOpenListener = treeView.onDidChangeSelection(async event => {
+        if (!allowSelectionOpen) {
+            return;
+        }
+
         const item = event.selection[0];
         if (!item?.itemData) {
             return;
@@ -933,6 +943,25 @@ export function activate(context: vscode.ExtensionContext) {
         return vscode.window.terminals.find(t => t.name === name);
     };
 
+    const managedTerminals = new WeakSet<vscode.Terminal>();
+
+    const createManagedTerminal = (options: vscode.TerminalOptions): vscode.Terminal => {
+        const terminal = vscode.window.createTerminal(options);
+        managedTerminals.add(terminal);
+        return terminal;
+    };
+
+    const findManagedTerminalByName = (name: string): vscode.Terminal | undefined => {
+        return vscode.window.terminals.find(t => t.name === name && managedTerminals.has(t));
+    };
+
+    const disposeRestoredTerminalByName = (name: string): void => {
+        const restoredTerminal = vscode.window.terminals.find(t => t.name === name && !managedTerminals.has(t));
+        if (restoredTerminal) {
+            restoredTerminal.dispose();
+        }
+    };
+
     const getTaskRemoteId = (task: TerminalTaskItem): string => normalizeRemoteId(task.remoteId);
 
     const getSessionTerminalName = (kind: 'tmux' | 'zellij', sessionName: string, remoteId?: string): string => {
@@ -979,22 +1008,35 @@ export function activate(context: vscode.ExtensionContext) {
     const runTaskDirectly = async (task: TerminalTaskItem) => {
         const terminalName = getTaskTerminalName(task);
         const legacyTerminalName = getLegacyTaskTerminalName(task);
-        const existingTerminal = findTerminalByName(terminalName) ||
-            (legacyTerminalName ? findTerminalByName(legacyTerminalName) : undefined) ||
-            (getTaskRemoteId(task) === LOCAL_REMOTE_ID ? findTerminalByName(task.name) : undefined);
+        const taskProfile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
+        const taskUsesTmux = taskProfile?.tmux?.enabled || task.overrides?.tmux?.enabled;
+        const taskUsesZellij = !taskUsesTmux && (taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled);
+        const taskUsesMultiplexer = taskUsesTmux || taskUsesZellij;
+        const candidateNames = [
+            terminalName,
+            legacyTerminalName,
+            getTaskRemoteId(task) === LOCAL_REMOTE_ID ? task.name : undefined
+        ].filter((name): name is string => Boolean(name));
+        const existingTerminal = taskUsesMultiplexer
+            ? candidateNames.map(findManagedTerminalByName).find((terminal): terminal is vscode.Terminal => Boolean(terminal))
+            : candidateNames.map(findTerminalByName).find((terminal): terminal is vscode.Terminal => Boolean(terminal));
+
         if (existingTerminal) {
-            // Fast path: focusing an existing VS Code terminal should not touch tmux/zellij.
             try {
                 existingTerminal.show();
                 return;
             } catch {
-                // Terminal was disposed, fall through to create a new one
+                // Terminal was disposed, fall through to create a new one.
+            }
+        }
+
+        if (taskUsesMultiplexer) {
+            for (const candidateName of candidateNames) {
+                disposeRestoredTerminalByName(candidateName);
             }
         }
 
         // Auto-delete EXITED zellij sessions before launching to avoid resurrection issues
-        const taskProfile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
-        const taskUsesZellij = taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled;
         if (taskUsesZellij) {
             const sessionName = task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name;
             const remote = configManager.getTaskRemote(task);
@@ -1005,7 +1047,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
         const generated = configManager.generateTaskCommand(task);
-        const terminal = vscode.window.createTerminal({
+        const terminal = createManagedTerminal({
             name: terminalName,
             location: terminalLocation === 'editor'
                 ? vscode.TerminalLocation.Editor
@@ -1515,17 +1557,18 @@ export function activate(context: vscode.ExtensionContext) {
             // Check if terminal with this name already exists
             const remote = configManager.getRemote(session.remoteId);
             const terminalName = getSessionTerminalName('tmux', session.name, remote.id);
-            const existingTerminal = findTerminalByName(terminalName);
+            const existingTerminal = findManagedTerminalByName(terminalName);
             if (existingTerminal) {
                 // Reuse existing terminal - just show it
                 existingTerminal.show();
                 return;
             }
+            disposeRestoredTerminalByName(terminalName);
 
             // Create terminal - don't set cwd since tmux will handle the working directory
             // The session's path might not exist on the Windows side or could be invalid
             const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
-            const terminal = vscode.window.createTerminal({
+            const terminal = createManagedTerminal({
                 name: terminalName,
                 // Intentionally not setting cwd - tmux attach will restore the session's directory
                 location: terminalLocation === 'editor'
@@ -2019,7 +2062,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             // Check if terminal with this name already exists
             const terminalName = getSessionTerminalName('zellij', session.name, remote.id);
-            const existingTerminal = findTerminalByName(terminalName);
+            const existingTerminal = findManagedTerminalByName(terminalName);
             if (existingTerminal && !createFresh) {
                 // Reuse existing terminal - just show it
                 try {
@@ -2029,10 +2072,11 @@ export function activate(context: vscode.ExtensionContext) {
                     // Terminal was disposed, fall through to create a new one
                 }
             }
+            disposeRestoredTerminalByName(terminalName);
 
             // Create terminal - don't set cwd since zellij will handle the working directory
             const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
-            const terminal = vscode.window.createTerminal({
+            const terminal = createManagedTerminal({
                 name: terminalName,
                 location: terminalLocation === 'editor'
                     ? vscode.TerminalLocation.Editor
@@ -2251,8 +2295,10 @@ export function activate(context: vscode.ExtensionContext) {
 
             for (const session of untrackedSessions) {
                 const remote = configManager.getRemote(session.remoteId);
-                const terminal = vscode.window.createTerminal({
-                    name: getSessionTerminalName('zellij', session.name, remote.id),
+                const terminalName = getSessionTerminalName('zellij', session.name, remote.id);
+                disposeRestoredTerminalByName(terminalName);
+                const terminal = createManagedTerminal({
+                    name: terminalName,
                     location: terminalLocation === 'editor'
                         ? vscode.TerminalLocation.Editor
                         : vscode.TerminalLocation.Panel
@@ -2417,8 +2463,10 @@ export function activate(context: vscode.ExtensionContext) {
             for (const session of untrackedSessions) {
                 const remote = configManager.getRemote(session.remoteId);
                 // Don't set cwd - tmux will restore the session's working directory
-                const terminal = vscode.window.createTerminal({
-                    name: getSessionTerminalName('tmux', session.name, remote.id),
+                const terminalName = getSessionTerminalName('tmux', session.name, remote.id);
+                disposeRestoredTerminalByName(terminalName);
+                const terminal = createManagedTerminal({
+                    name: terminalName,
                     location: terminalLocation === 'editor'
                         ? vscode.TerminalLocation.Editor
                         : vscode.TerminalLocation.Panel
