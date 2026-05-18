@@ -347,8 +347,15 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         // Local remotes are queried synchronously (fast, no network).
         // SSH remotes are queried asynchronously so they never block tree rendering:
         // results are stored when ready and a tree refresh is triggered automatically.
-        const localRemotes = remotes.filter(r => r.type !== 'ssh');
+        const scanLocalHostSessions = this.shouldScanLocalHostSessions();
+        const localRemotes = scanLocalHostSessions
+            ? remotes.filter(r => r.type !== 'ssh')
+            : [];
         const sshRemotes = remotes.filter(r => r.type === 'ssh');
+
+        if (!scanLocalHostSessions) {
+            this.clearLocalHostSessionCache();
+        }
 
         // Synchronous pass for local remotes
         this.refreshRemotesSync(localRemotes);
@@ -358,6 +365,19 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         if (remotesToRefresh.length > 0) {
             this.refreshRemotesAsync(remotesToRefresh);
         }
+    }
+
+    private shouldScanLocalHostSessions(): boolean {
+        return !(this.configManager.getConfigMode() === 'user' && vscode.env.remoteName);
+    }
+
+    private clearLocalHostSessionCache(): void {
+        this.allTmuxSessions.set(LOCAL_REMOTE_ID, []);
+        this.allZellijSessions.set(LOCAL_REMOTE_ID, []);
+        this.activeTmuxSessions.set(LOCAL_REMOTE_ID, new Set());
+        this.activeZellijSessions.set(LOCAL_REMOTE_ID, new Set());
+        this.cachedUntrackedTmuxSessions.delete(LOCAL_REMOTE_ID);
+        this.cachedUntrackedZellijSessions.delete(LOCAL_REMOTE_ID);
     }
 
     private shouldRefreshSshRemote(remote: RemoteConfig): boolean {
