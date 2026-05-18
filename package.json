@@ -2,7 +2,7 @@
   "name": "terminal-workspaces",
   "displayName": "Terminal Workspaces",
   "description": "Manage terminal sessions with a sidebar GUI. Supports WSL, tmux, Zellij, PowerShell, nested folders, profiles, and more. Perfect for multi-project and agentic coding workflows.",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "publisher": "cybersader",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -44,7 +44,8 @@
   ],
   "main": "./out/extension.js",
   "extensionKind": [
-    "ui"
+    "ui",
+    "workspace"
   ],
   "contributes": {
     "viewsContainers": {
@@ -146,6 +147,16 @@
         "command": "terminalWorkspaces.switchConfigMode",
         "title": "Terminal Workspaces: Switch Config Mode",
         "icon": "$(layers)"
+      },
+      {
+        "command": "terminalWorkspaces.switchLayerMode",
+        "title": "Terminal Workspaces: Switch Layer",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "terminalWorkspaces.switchExecutionMode",
+        "title": "Terminal Workspaces: Switch Execution Mode",
+        "icon": "$(terminal)"
       },
       {
         "command": "terminalWorkspaces.editTask",
@@ -348,7 +359,7 @@
           "group": "navigation@5"
         },
         {
-          "command": "terminalWorkspaces.switchConfigMode",
+          "command": "terminalWorkspaces.switchLayerMode",
           "when": "view == terminalWorkspacesView",
           "group": "navigation@6"
         },
@@ -398,14 +409,19 @@
           "group": "overflow@6"
         },
         {
-          "command": "terminalWorkspaces.switchConfigMode",
+          "command": "terminalWorkspaces.switchLayerMode",
           "when": "view == terminalWorkspacesView",
           "group": "overflow@7"
         },
         {
-          "command": "terminalWorkspaces.addRemote",
+          "command": "terminalWorkspaces.switchConfigMode",
           "when": "view == terminalWorkspacesView",
           "group": "overflow@8"
+        },
+        {
+          "command": "terminalWorkspaces.addRemote",
+          "when": "view == terminalWorkspacesView",
+          "group": "overflow@9"
         }
       ],
       "view/item/context": [

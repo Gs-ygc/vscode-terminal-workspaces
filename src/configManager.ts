@@ -14,15 +14,36 @@ import { buildSshCommand, createLocalRemote, LOCAL_REMOTE_ID, normalizeRemoteId,
 
 export type ConfigScope = 'workspace' | 'global';
 export type ConfigMode = 'auto' | 'user' | 'workspace';
+export type LayerMode = 'ui' | 'remote' | 'workspace';
+export type ExecutionMode = 'ui' | 'workspace';
 
 export class ConfigManager {
     private config: TerminalTasksConfig | null = null;
     private configUri: vscode.Uri | null = null;
     private configScope: ConfigScope = 'global';
     private configMode: ConfigMode;
+    private layerMode: LayerMode;
+    private executionMode: ExecutionMode;
 
     constructor(private readonly context: vscode.ExtensionContext) {
-        this.configMode = context.workspaceState.get<ConfigMode>('terminalWorkspaces.configMode', 'auto');
+        const legacyConfigMode = context.workspaceState.get<ConfigMode>('terminalWorkspaces.configMode');
+        const legacyExecutionMode = context.workspaceState.get<ExecutionMode>('terminalWorkspaces.executionMode', 'ui');
+        this.layerMode = context.workspaceState.get<LayerMode>(
+            'terminalWorkspaces.layerMode',
+            legacyConfigMode === 'workspace'
+                ? 'workspace'
+                : legacyExecutionMode === 'workspace'
+                    ? 'remote'
+                    : 'ui'
+        );
+        this.configMode = context.workspaceState.get<ConfigMode>(
+            'terminalWorkspaces.configMode',
+            this.getConfigModeForLayer(this.layerMode)
+        );
+        if (this.configMode === 'auto') {
+            this.configMode = this.getConfigModeForLayer(this.layerMode);
+        }
+        this.executionMode = this.getExecutionModeForLayer(this.layerMode);
     }
 
     /**
@@ -42,6 +63,38 @@ export class ConfigManager {
         this.configUri = null;
         await this.context.workspaceState.update('terminalWorkspaces.configMode', mode);
         return this.loadConfig();
+    }
+
+    getLayerMode(): LayerMode {
+        return this.layerMode;
+    }
+
+    async setLayerMode(mode: LayerMode): Promise<TerminalTasksConfig> {
+        this.layerMode = mode;
+        this.executionMode = this.getExecutionModeForLayer(mode);
+        this.configMode = this.getConfigModeForLayer(mode);
+        this.config = null;
+        this.configUri = null;
+        await this.context.workspaceState.update('terminalWorkspaces.layerMode', mode);
+        await this.context.workspaceState.update('terminalWorkspaces.executionMode', this.executionMode);
+        await this.context.workspaceState.update('terminalWorkspaces.configMode', this.configMode);
+        return this.loadConfig();
+    }
+
+    getExecutionMode(): ExecutionMode {
+        return this.getExecutionModeForLayer(this.layerMode);
+    }
+
+    async setExecutionMode(mode: ExecutionMode): Promise<TerminalTasksConfig> {
+        return this.setLayerMode(mode === 'ui' ? 'ui' : 'remote');
+    }
+
+    private getConfigModeForLayer(mode: LayerMode): ConfigMode {
+        return mode === 'workspace' ? 'workspace' : 'user';
+    }
+
+    private getExecutionModeForLayer(mode: LayerMode): ExecutionMode {
+        return mode === 'ui' ? 'ui' : 'workspace';
     }
 
     /**

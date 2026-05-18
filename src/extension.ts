@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ConfigManager, ConfigMode, ConfigScope } from './configManager';
+import { ConfigManager, ConfigMode, ConfigScope, LayerMode, ExecutionMode } from './configManager';
 import { TerminalTasksProvider, TaskTreeItem, TaskConfigDialog, FolderQuickPick, TmuxSessionData, ZellijSessionData, TerminalTasksDragAndDropController } from './terminalWorkspacesProvider';
 import { RemoteConfig, TerminalTaskItem, TaskFolder } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
@@ -30,6 +30,21 @@ function getConfigModeLabel(mode: ConfigMode, scope: ConfigScope): string {
         return scope === 'workspace' ? 'Workspace' : 'Workspace (no folder)';
     }
     return scope === 'workspace' ? 'Auto: Workspace' : 'Auto: User';
+}
+
+function getExecutionModeLabel(mode: ExecutionMode): string {
+    return mode === 'workspace' ? 'Workspace' : 'UI';
+}
+
+function getLayerModeLabel(mode: LayerMode): string {
+    switch (mode) {
+        case 'ui':
+            return 'UI';
+        case 'remote':
+            return 'Remote';
+        case 'workspace':
+            return 'Workspace';
+    }
 }
 
 function shouldUseLocalMultiplexerCommand(): boolean {
@@ -148,23 +163,23 @@ function getCurrentExtensionKind(): vscode.ExtensionKind | undefined {
     return vscode.extensions.getExtension('cybersader.terminal-workspaces')?.extensionKind;
 }
 
-function getSshConfigSourceLabel(): string {
-    return getCurrentExtensionKind() === vscode.ExtensionKind.UI
+function getSshConfigSourceLabel(mode: ExecutionMode): string {
+    return mode === 'ui'
         ? 'Local UI SSH config'
         : 'Remote/workspace SSH config';
 }
 
-function ensureSshRemoteCanUseLocalTerminal(remote: RemoteConfig): boolean {
+function ensureSshRemoteCanUseTerminal(remote: RemoteConfig, executionMode: ExecutionMode): boolean {
     if (remote.type !== 'ssh') {
         return true;
     }
 
-    if (getCurrentExtensionKind() === vscode.ExtensionKind.UI) {
+    if (executionMode === 'workspace' || getCurrentExtensionKind() === vscode.ExtensionKind.UI) {
         return true;
     }
 
     vscode.window.showErrorMessage(
-        `Remote "${remote.label}" must be opened from the local UI extension host. Install Terminal Workspaces 0.8.6+ locally and reload VS Code.`
+        `Remote "${remote.label}" needs the UI extension host in UI mode, or switch Execution Mode to Workspace.`
     );
     return false;
 }
@@ -262,9 +277,15 @@ export function activate(context: vscode.ExtensionContext) {
     const updateConfigModeContext = () => {
         const mode = configManager.getConfigMode();
         const scope = configManager.getConfigScope();
+        const layerMode = configManager.getLayerMode();
+        const executionMode = configManager.getExecutionMode();
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.layerMode', layerMode);
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.layerModeLabel', getLayerModeLabel(layerMode));
         vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configMode', mode);
         vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configScope', scope);
         vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configModeLabel', getConfigModeLabel(mode, scope));
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.executionMode', executionMode);
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.executionModeLabel', getExecutionModeLabel(executionMode));
     };
 
     // Initialize config
@@ -452,8 +473,9 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
             const config = await configManager.getConfig();
             const sshConfigHosts = getSshConfigHosts();
-            const sourceLabel = getSshConfigSourceLabel();
-            const isWorkspaceHost = getCurrentExtensionKind() === vscode.ExtensionKind.Workspace;
+            const executionMode = configManager.getExecutionMode();
+            const sourceLabel = getSshConfigSourceLabel(executionMode);
+            const isWorkspaceHost = executionMode === 'workspace';
             const items: (vscode.QuickPickItem & {
                 action: 'manual' | 'sshConfig' | 'info';
                 sshHost?: SshConfigHost;
@@ -1129,7 +1151,7 @@ export function activate(context: vscode.ExtensionContext) {
         remote: RemoteConfig,
         options: { show?: boolean; createFresh?: boolean; remember?: boolean } = {}
     ): Promise<vscode.Terminal> => {
-        if (!ensureSshRemoteCanUseLocalTerminal(remote)) {
+        if (!ensureSshRemoteCanUseTerminal(remote, configManager.getExecutionMode())) {
             throw new Error(`Cannot open SSH remote "${remote.label}" from workspace extension host`);
         }
 
@@ -1225,7 +1247,7 @@ export function activate(context: vscode.ExtensionContext) {
         const terminalName = getTaskTerminalName(task);
         const legacyTerminalName = getLegacyTaskTerminalName(task);
         const taskRemote = configManager.getTaskRemote(task);
-        if (!ensureSshRemoteCanUseLocalTerminal(taskRemote)) {
+        if (!ensureSshRemoteCanUseTerminal(taskRemote, configManager.getExecutionMode())) {
             return;
         }
 
@@ -2707,8 +2729,48 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // =========================================================================
-    // CONFIG MODE
+    // LAYER AND CONFIG MODE
     // =========================================================================
+
+    const switchLayerModeCommand = vscode.commands.registerCommand(
+        'terminalWorkspaces.switchLayerMode',
+        async () => {
+            const currentMode = configManager.getLayerMode();
+            const options: Array<vscode.QuickPickItem & { mode: LayerMode }> = [
+                {
+                    label: currentMode === 'ui' ? '$(check) UI' : 'UI',
+                    description: 'Local VS Code UI layer',
+                    detail: 'Default. Uses local user config, local SSH config, and local terminals.',
+                    mode: 'ui'
+                },
+                {
+                    label: currentMode === 'remote' ? '$(check) Remote' : 'Remote',
+                    description: 'Current VS Code remote layer',
+                    detail: 'Uses remote user config, remote SSH config, and remote terminals.',
+                    mode: 'remote'
+                },
+                {
+                    label: currentMode === 'workspace' ? '$(check) Workspace' : 'Workspace',
+                    description: 'Workspace file layer',
+                    detail: 'Uses .vscode/terminal-workspaces.json with workspace-host terminals.',
+                    mode: 'workspace'
+                }
+            ];
+
+            const selected = await vscode.window.showQuickPick(options, {
+                placeHolder: `Layer mode: ${getLayerModeLabel(currentMode)}`
+            });
+
+            if (!selected) {
+                return;
+            }
+
+            await configManager.setLayerMode(selected.mode);
+            updateConfigModeContext();
+            treeDataProvider.refresh();
+            vscode.window.showInformationMessage(`Terminal Workspaces layer mode: ${getLayerModeLabel(selected.mode)}`);
+        }
+    );
 
     const switchConfigModeCommand = vscode.commands.registerCommand(
         'terminalWorkspaces.switchConfigMode',
@@ -2747,6 +2809,40 @@ export function activate(context: vscode.ExtensionContext) {
             updateConfigModeContext();
             treeDataProvider.refresh();
             vscode.window.showInformationMessage(`Terminal Workspaces config mode: ${getConfigModeLabel(configManager.getConfigMode(), configManager.getConfigScope())}`);
+        }
+    );
+
+    const switchExecutionModeCommand = vscode.commands.registerCommand(
+        'terminalWorkspaces.switchExecutionMode',
+        async () => {
+            const currentMode = configManager.getExecutionMode();
+            const options: Array<vscode.QuickPickItem & { mode: ExecutionMode }> = [
+                {
+                    label: currentMode === 'ui' ? '$(check) UI' : 'UI',
+                    description: 'Use the local VS Code UI host',
+                    detail: 'Default mode. Uses local config storage, local SSH config, and local terminals for SSH remotes.',
+                    mode: 'ui'
+                },
+                {
+                    label: currentMode === 'workspace' ? '$(check) Workspace' : 'Workspace',
+                    description: 'Use the current workspace extension host',
+                    detail: 'Useful when you intentionally want workspace-host config, SSH config, and terminals.',
+                    mode: 'workspace'
+                }
+            ];
+
+            const selected = await vscode.window.showQuickPick(options, {
+                placeHolder: `Execution mode: ${getExecutionModeLabel(currentMode)}`
+            });
+
+            if (!selected) {
+                return;
+            }
+
+            await configManager.setExecutionMode(selected.mode);
+            updateConfigModeContext();
+            treeDataProvider.refresh();
+            vscode.window.showInformationMessage(`Terminal Workspaces execution mode: ${getExecutionModeLabel(selected.mode)}`);
         }
     );
 
@@ -2823,7 +2919,9 @@ export function activate(context: vscode.ExtensionContext) {
         regenerateTasksJsonCommand,
         openManagerCommand,
         openSettingsCommand,
+        switchLayerModeCommand,
         switchConfigModeCommand,
+        switchExecutionModeCommand,
         revealInExplorerCommand,
         revealInVSCodeExplorerCommand,
         searchTasksCommand,
