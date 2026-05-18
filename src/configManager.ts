@@ -13,19 +13,35 @@ import {
 import { buildSshCommand, createLocalRemote, LOCAL_REMOTE_ID, normalizeRemoteId, shellQuote } from './remoteUtils';
 
 export type ConfigScope = 'workspace' | 'global';
+export type ConfigMode = 'auto' | 'user' | 'workspace';
 
 export class ConfigManager {
     private config: TerminalTasksConfig | null = null;
     private configUri: vscode.Uri | null = null;
     private configScope: ConfigScope = 'global';
+    private configMode: ConfigMode;
 
-    constructor(private readonly context: vscode.ExtensionContext) {}
+    constructor(private readonly context: vscode.ExtensionContext) {
+        this.configMode = context.workspaceState.get<ConfigMode>('terminalWorkspaces.configMode', 'auto');
+    }
 
     /**
      * Which scope is currently active ('workspace' or 'global').
      */
     getConfigScope(): ConfigScope {
         return this.configScope;
+    }
+
+    getConfigMode(): ConfigMode {
+        return this.configMode;
+    }
+
+    async setConfigMode(mode: ConfigMode): Promise<TerminalTasksConfig> {
+        this.configMode = mode;
+        this.config = null;
+        this.configUri = null;
+        await this.context.workspaceState.update('terminalWorkspaces.configMode', mode);
+        return this.loadConfig();
     }
 
     /**
@@ -50,7 +66,18 @@ export class ConfigManager {
      * Resolve the best config URI: workspace when available, otherwise global.
      */
     private resolveConfigUri(): { uri: vscode.Uri; scope: ConfigScope } {
+        if (this.configMode === 'user') {
+            return { uri: this.getGlobalConfigUri(), scope: 'global' };
+        }
+
         const workspaceUri = this.getWorkspaceConfigUri();
+        if (this.configMode === 'workspace') {
+            if (!workspaceUri) {
+                return { uri: this.getGlobalConfigUri(), scope: 'global' };
+            }
+            return { uri: workspaceUri, scope: 'workspace' };
+        }
+
         if (workspaceUri) {
             return { uri: workspaceUri, scope: 'workspace' };
         }

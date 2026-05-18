@@ -2,7 +2,7 @@
   "name": "terminal-workspaces",
   "displayName": "Terminal Workspaces",
   "description": "Manage terminal sessions with a sidebar GUI. Supports WSL, tmux, Zellij, PowerShell, nested folders, profiles, and more. Perfect for multi-project and agentic coding workflows.",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "publisher": "cybersader",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -142,6 +142,11 @@
         "command": "terminalWorkspaces.openSettings",
         "title": "Terminal Workspaces: Open Settings",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "terminalWorkspaces.switchConfigMode",
+        "title": "Terminal Workspaces: Switch Config Mode",
+        "icon": "$(layers)"
       },
       {
         "command": "terminalWorkspaces.editTask",
@@ -344,19 +349,24 @@
           "group": "navigation@5"
         },
         {
-          "command": "terminalWorkspaces.addRemote",
+          "command": "terminalWorkspaces.switchConfigMode",
           "when": "view == terminalWorkspacesView",
           "group": "navigation@6"
         },
         {
+          "command": "terminalWorkspaces.addRemote",
+          "when": "view == terminalWorkspacesView",
+          "group": "navigation@7"
+        },
+        {
           "command": "terminalWorkspaces.toggleActiveFilter",
           "when": "view == terminalWorkspacesView && !terminalWorkspaces.showActiveOnly",
-          "group": "navigation@7"
+          "group": "navigation@8"
         },
         {
           "command": "terminalWorkspaces.toggleActiveFilterOff",
           "when": "view == terminalWorkspacesView && terminalWorkspaces.showActiveOnly",
-          "group": "navigation@7"
+          "group": "navigation@8"
         },
         {
           "command": "terminalWorkspaces.addBrowseFolder",
@@ -389,9 +399,14 @@
           "group": "overflow@6"
         },
         {
-          "command": "terminalWorkspaces.addRemote",
+          "command": "terminalWorkspaces.switchConfigMode",
           "when": "view == terminalWorkspacesView",
           "group": "overflow@7"
+        },
+        {
+          "command": "terminalWorkspaces.addRemote",
+          "when": "view == terminalWorkspacesView",
+          "group": "overflow@8"
         }
       ],
       "view/item/context": [

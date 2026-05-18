@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
-import { ConfigManager, ConfigScope } from './configManager';
+import { ConfigManager, ConfigMode, ConfigScope } from './configManager';
 import { TerminalTasksProvider, TaskTreeItem, TaskConfigDialog, FolderQuickPick, TmuxSessionData, ZellijSessionData, TerminalTasksDragAndDropController } from './terminalWorkspacesProvider';
 import { RemoteConfig, TerminalTaskItem, TaskFolder } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
@@ -20,6 +20,16 @@ interface OpenMultiplexerTerminal {
     sessionName: string;
     remoteId: string;
     terminalName: string;
+}
+
+function getConfigModeLabel(mode: ConfigMode, scope: ConfigScope): string {
+    if (mode === 'user') {
+        return 'User';
+    }
+    if (mode === 'workspace') {
+        return scope === 'workspace' ? 'Workspace' : 'Workspace (no folder)';
+    }
+    return scope === 'workspace' ? 'Auto: Workspace' : 'Auto: User';
 }
 
 function shouldUseLocalMultiplexerCommand(): boolean {
@@ -218,6 +228,14 @@ export function activate(context: vscode.ExtensionContext) {
     configManager = new ConfigManager(context);
     treeDataProvider = new TerminalTasksProvider(configManager);
 
+    const updateConfigModeContext = () => {
+        const mode = configManager.getConfigMode();
+        const scope = configManager.getConfigScope();
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configMode', mode);
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configScope', scope);
+        vscode.commands.executeCommand('setContext', 'terminalWorkspaces.configModeLabel', getConfigModeLabel(mode, scope));
+    };
+
     // Initialize config
     configManager.loadConfig();
 
@@ -226,21 +244,13 @@ export function activate(context: vscode.ExtensionContext) {
         await configManager.loadConfig();
         treeDataProvider.refresh();
         // Update context key so the title bar can show current scope
-        vscode.commands.executeCommand(
-            'setContext',
-            'terminalWorkspaces.configScope',
-            configManager.getConfigScope()
-        );
+        updateConfigModeContext();
     });
     context.subscriptions.push(workspaceFolderListener);
 
     // Set initial scope context key
     configManager.getConfig().then(() => {
-        vscode.commands.executeCommand(
-            'setContext',
-            'terminalWorkspaces.configScope',
-            configManager.getConfigScope()
-        );
+        updateConfigModeContext();
     });
 
     // Create and register the tree view
@@ -2636,20 +2646,67 @@ export function activate(context: vscode.ExtensionContext) {
     );
 
     // =========================================================================
+    // CONFIG MODE
+    // =========================================================================
+
+    const switchConfigModeCommand = vscode.commands.registerCommand(
+        'terminalWorkspaces.switchConfigMode',
+        async () => {
+            const currentMode = configManager.getConfigMode();
+            const options: Array<vscode.QuickPickItem & { mode: ConfigMode }> = [
+                {
+                    label: currentMode === 'auto' ? '$(check) Auto' : 'Auto',
+                    description: 'Workspace when available, otherwise User',
+                    detail: 'Good default for normal VS Code use.',
+                    mode: 'auto'
+                },
+                {
+                    label: currentMode === 'user' ? '$(check) User' : 'User',
+                    description: 'Always use extension user/global config',
+                    detail: 'Shared by windows running on the same extension host.',
+                    mode: 'user'
+                },
+                {
+                    label: currentMode === 'workspace' ? '$(check) Workspace' : 'Workspace',
+                    description: 'Always use workspace config',
+                    detail: 'Stored at .vscode/terminal-workspaces.json in the current workspace.',
+                    mode: 'workspace'
+                }
+            ];
+
+            const selected = await vscode.window.showQuickPick(options, {
+                placeHolder: `Config mode: ${getConfigModeLabel(configManager.getConfigMode(), configManager.getConfigScope())}`
+            });
+
+            if (!selected) {
+                return;
+            }
+
+            await configManager.setConfigMode(selected.mode);
+            updateConfigModeContext();
+            treeDataProvider.refresh();
+            vscode.window.showInformationMessage(`Terminal Workspaces config mode: ${getConfigModeLabel(configManager.getConfigMode(), configManager.getConfigScope())}`);
+        }
+    );
+
+    // =========================================================================
     // FILE WATCHER
     // =========================================================================
 
     const configWatcher = vscode.workspace.createFileSystemWatcher('**/.vscode/terminal-workspaces.json');
     configWatcher.onDidChange(async () => {
         await configManager.loadConfig();
+        updateConfigModeContext();
         treeDataProvider.refresh();
     });
     configWatcher.onDidCreate(async () => {
         await configManager.loadConfig();
+        updateConfigModeContext();
         treeDataProvider.refresh();
     });
     configWatcher.onDidDelete(async () => {
         await configManager.loadConfig();
+        updateConfigModeContext();
         treeDataProvider.refresh();
     });
 
@@ -2705,6 +2762,7 @@ export function activate(context: vscode.ExtensionContext) {
         regenerateTasksJsonCommand,
         openManagerCommand,
         openSettingsCommand,
+        switchConfigModeCommand,
         revealInExplorerCommand,
         revealInVSCodeExplorerCommand,
         searchTasksCommand,
