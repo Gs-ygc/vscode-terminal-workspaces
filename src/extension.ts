@@ -169,6 +169,12 @@ function ensureSshRemoteCanUseLocalTerminal(remote: RemoteConfig): boolean {
     return false;
 }
 
+function getDefaultTmuxProfileId(remoteId?: string): string {
+    return normalizeRemoteId(remoteId) === LOCAL_REMOTE_ID && process.platform === 'win32'
+        ? 'wsl-tmux'
+        : 'bash-tmux';
+}
+
 function parseSshConfig(content: string, source: string): SshConfigHost[] {
     const hosts: SshConfigHost[] = [];
     let current: SshConfigHost[] = [];
@@ -1740,7 +1746,8 @@ export function activate(context: vscode.ExtensionContext) {
                     await configManager.addTask({
                         name: item.session.name,
                         path: item.session.path,
-                        profileId: 'wsl-tmux', // Use WSL+tmux profile
+                        remoteId: normalizeRemoteId(item.session.remoteId),
+                        profileId: getDefaultTmuxProfileId(item.session.remoteId),
                         overrides: {
                             tmux: {
                                 enabled: true,
@@ -1821,7 +1828,7 @@ export function activate(context: vscode.ExtensionContext) {
                     name,
                     path: session.path,
                     remoteId: normalizeRemoteId(session.remoteId),
-                    profileId: 'wsl-tmux',
+                    profileId: getDefaultTmuxProfileId(session.remoteId),
                     overrides: {
                         tmux: {
                             enabled: true,
