@@ -943,10 +943,20 @@ export function activate(context: vscode.ExtensionContext) {
         return vscode.window.terminals.find(t => t.name === name);
     };
 
+    const isMultiplexerTerminalName = (name: string): boolean => {
+        return name.startsWith('tmux: ') ||
+            name.startsWith('zellij: ') ||
+            /^tmux@[^:]+: /.test(name) ||
+            /^zellij@[^:]+: /.test(name);
+    };
+
     const managedTerminals = new WeakSet<vscode.Terminal>();
 
     const createManagedTerminal = (options: vscode.TerminalOptions): vscode.Terminal => {
-        const terminal = vscode.window.createTerminal(options);
+        const terminal = vscode.window.createTerminal({
+            ...options,
+            isTransient: true
+        });
         managedTerminals.add(terminal);
         return terminal;
     };
@@ -961,6 +971,16 @@ export function activate(context: vscode.ExtensionContext) {
             restoredTerminal.dispose();
         }
     };
+
+    const disposeRestoredMultiplexerTerminals = () => {
+        for (const terminal of vscode.window.terminals) {
+            if (!managedTerminals.has(terminal) && isMultiplexerTerminalName(terminal.name)) {
+                terminal.dispose();
+            }
+        }
+    };
+
+    disposeRestoredMultiplexerTerminals();
 
     const getTaskRemoteId = (task: TerminalTaskItem): string => normalizeRemoteId(task.remoteId);
 
