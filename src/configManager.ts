@@ -203,6 +203,10 @@ export class ConfigManager {
         return this.config;
     }
 
+    getConfigSync(): TerminalTasksConfig | undefined {
+        return this.config || undefined;
+    }
+
     // =========================================================================
     // PROFILE MANAGEMENT
     // =========================================================================

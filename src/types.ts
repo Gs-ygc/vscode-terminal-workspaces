@@ -164,6 +164,38 @@ export interface TerminalTasksConfig {
 
 export const BUILTIN_PROFILES: Profile[] = [
     {
+        id: 'bash-tmux',
+        name: 'Bash + tmux',
+        description: 'Bash with tmux session (Linux/macOS/remote)',
+        shellType: 'bash',
+        tmux: {
+            enabled: true,
+            mode: 'attach-or-create'
+        },
+        builtin: true,
+        icon: 'terminal-bash'
+    },
+    {
+        id: 'bash-zellij',
+        name: 'Bash + Zellij',
+        description: 'Bash with Zellij session (Linux/macOS/remote)',
+        shellType: 'bash',
+        zellij: {
+            enabled: true,
+            mode: 'attach-or-create'
+        },
+        builtin: true,
+        icon: 'terminal-bash'
+    },
+    {
+        id: 'bash',
+        name: 'Bash',
+        description: 'Native bash terminal (Linux/macOS/remote)',
+        shellType: 'bash',
+        builtin: true,
+        icon: 'terminal-bash'
+    },
+    {
         id: 'wsl-default',
         name: 'WSL (Default)',
         description: 'Open WSL terminal in directory',
@@ -212,26 +244,6 @@ export const BUILTIN_PROFILES: Profile[] = [
         icon: 'terminal-cmd'
     },
     {
-        id: 'bash',
-        name: 'Bash',
-        description: 'Native bash terminal (Linux/macOS)',
-        shellType: 'bash',
-        builtin: true,
-        icon: 'terminal-bash'
-    },
-    {
-        id: 'bash-zellij',
-        name: 'Bash + Zellij',
-        description: 'Bash with Zellij session (Linux/macOS)',
-        shellType: 'bash',
-        zellij: {
-            enabled: true,
-            mode: 'attach-or-create'
-        },
-        builtin: true,
-        icon: 'terminal-bash'
-    },
-    {
         id: 'default',
         name: 'VS Code Default',
         description: 'Use VS Code\'s default terminal profile',
@@ -248,7 +260,7 @@ export const BUILTIN_PROFILES: Profile[] = [
 export const DEFAULT_CONFIG: TerminalTasksConfig = {
     version: '1.0.0',
     profiles: [],
-    defaultProfileId: 'wsl-default',
+    defaultProfileId: 'bash-tmux',
     remotes: [
         {
             id: 'local',

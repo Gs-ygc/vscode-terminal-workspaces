@@ -947,7 +947,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const getTaskTerminalName = (task: TerminalTaskItem): string => {
         const remoteId = getTaskRemoteId(task);
-        const profile = configManager.getProfile(task.profileId || 'wsl-default');
+        const profile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
         if (profile?.tmux?.enabled || task.overrides?.tmux?.enabled) {
             const sessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
             return getSessionTerminalName('tmux', sessionName, remoteId);
@@ -961,7 +961,7 @@ export function activate(context: vscode.ExtensionContext) {
 
     const getLegacyTaskTerminalName = (task: TerminalTaskItem): string | undefined => {
         const remoteId = getTaskRemoteId(task);
-        const profile = configManager.getProfile(task.profileId || 'wsl-default');
+        const profile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
         if (profile?.tmux?.enabled || task.overrides?.tmux?.enabled) {
             const sessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
             const legacySessionName = getLegacySanitizedSessionName(sessionName);
@@ -993,7 +993,7 @@ export function activate(context: vscode.ExtensionContext) {
         }
 
         // Auto-delete EXITED zellij sessions before launching to avoid resurrection issues
-        const taskProfile = configManager.getProfile(task.profileId || 'wsl-default');
+        const taskProfile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
         const taskUsesZellij = taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled;
         if (taskUsesZellij) {
             const sessionName = task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name;
@@ -1428,7 +1428,7 @@ export function activate(context: vscode.ExtensionContext) {
             const flatTasks = configManager.flattenTasks();
             const trackedNames = new Set<string>();
             for (const ft of flatTasks) {
-                const profile = configManager.getProfile(ft.task.profileId || 'wsl-default');
+                const profile = configManager.getProfile(ft.task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
                 if (profile?.tmux?.enabled === true || ft.task.overrides?.tmux?.enabled === true) {
                     const sessionName = ft.task.overrides?.tmux?.sessionName || ft.task.name;
                     trackedNames.add(sessionName.toLowerCase());
@@ -2156,7 +2156,7 @@ export function activate(context: vscode.ExtensionContext) {
             const flatTasks = configManager.flattenTasks();
             const trackedNames = new Set<string>();
             for (const ft of flatTasks) {
-                const profile = configManager.getProfile(ft.task.profileId || 'wsl-default');
+                const profile = configManager.getProfile(ft.task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
                 if (profile?.zellij?.enabled === true || ft.task.overrides?.zellij?.enabled === true) {
                     const sessionName = ft.task.overrides?.zellij?.sessionName || ft.task.name;
                     trackedNames.add(sessionName.toLowerCase());

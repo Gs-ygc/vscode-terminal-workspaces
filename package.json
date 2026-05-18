@@ -2,7 +2,7 @@
   "name": "terminal-workspaces",
   "displayName": "Terminal Workspaces",
   "description": "Manage terminal sessions with a sidebar GUI. Supports WSL, tmux, Zellij, PowerShell, nested folders, profiles, and more. Perfect for multi-project and agentic coding workflows.",
-  "version": "0.7.6",
+  "version": "0.7.7",
   "publisher": "cybersader",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -659,25 +659,27 @@
       "properties": {
         "terminalWorkspaces.defaultProfile": {
           "type": "string",
-          "default": "wsl-default",
+          "default": "bash-tmux",
           "enum": [
+            "bash-tmux",
+            "bash-zellij",
+            "bash",
             "wsl-default",
             "wsl-tmux",
             "wsl-zellij",
             "powershell",
             "cmd",
-            "bash",
-            "bash-zellij",
             "default"
           ],
           "enumDescriptions": [
+            "Bash with tmux (attach-or-create sessions)",
+            "Bash with Zellij (attach-or-create sessions)",
+            "Native bash (Linux/macOS)",
             "WSL terminal (auto-detects Windows vs WSL environment)",
             "WSL with tmux (attach-or-create sessions)",
             "WSL with Zellij (attach-or-create sessions)",
             "Windows PowerShell",
             "Windows Command Prompt",
-            "Native bash (Linux/macOS)",
-            "Bash with Zellij (attach-or-create sessions)",
             "VS Code's default terminal profile"
           ],
           "description": "Default profile to use when creating new terminal tasks"

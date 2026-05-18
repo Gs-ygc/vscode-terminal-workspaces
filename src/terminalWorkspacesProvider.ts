@@ -58,6 +58,14 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
 
     constructor(private configManager: ConfigManager) {}
 
+    private getDefaultProfileId(): string {
+        return this.configManager.getConfigSync()?.defaultProfileId || 'bash-tmux';
+    }
+
+    private getTaskProfile(task: TerminalTaskItem): Profile | undefined {
+        return this.configManager.getProfile(task.profileId || this.getDefaultProfileId());
+    }
+
     /**
      * Toggle the active-only filter and refresh the tree
      */
@@ -245,7 +253,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
                 continue;
             }
             // Check if task uses tmux
-            const profile = this.configManager.getProfile(ft.task.profileId || 'wsl-default');
+            const profile = this.getTaskProfile(ft.task);
             if (profile?.tmux?.enabled === true || ft.task.overrides?.tmux?.enabled === true) {
                 // Use custom session name if set, otherwise task name
                 const rawSessionName = ft.task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || ft.task.name;
@@ -290,7 +298,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
                 continue;
             }
             // Check if task uses zellij
-            const profile = this.configManager.getProfile(ft.task.profileId || 'wsl-default');
+            const profile = this.getTaskProfile(ft.task);
             if (profile?.zellij?.enabled === true || ft.task.overrides?.zellij?.enabled === true) {
                 // Use custom session name if set, otherwise task name
                 const rawSessionName = ft.task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || ft.task.name;
@@ -513,7 +521,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
 
         remoteId = normalizeRemoteId(item.remoteId);
         // Task: check for active session or terminal
-        const profile = this.configManager.getProfile(item.profileId || 'wsl-default');
+        const profile = this.getTaskProfile(item);
         const isTmux = profile?.tmux?.enabled || item.overrides?.tmux?.enabled;
         const isZellij = !isTmux && (profile?.zellij?.enabled || item.overrides?.zellij?.enabled);
 
@@ -583,7 +591,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         item.id = `task-${remoteId}::${task.id}`;
 
         // Get the profile for this task
-        const profile = this.configManager.getProfile(task.profileId || 'wsl-default');
+        const profile = this.getTaskProfile(task);
 
         // Check which multiplexer this task uses (if any)
         // Note: tmux and zellij are mutually exclusive
@@ -1313,7 +1321,7 @@ export class TaskConfigDialog {
         configManager: ConfigManager,
         task: TerminalTaskItem
     ): Promise<Partial<TaskConfigResult> | undefined> {
-        const profile = configManager.getProfile(task.profileId || 'wsl-default');
+        const profile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
 
         const options = await vscode.window.showQuickPick([
             {
