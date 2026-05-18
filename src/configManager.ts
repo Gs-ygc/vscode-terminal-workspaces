@@ -752,7 +752,7 @@ export class ConfigManager {
         const merged = this.mergeProfileWithOverrides(profile, task.overrides);
         const remote = this.getTaskRemote(task);
         if (remote.type === 'ssh') {
-            const sessionName = this.sanitizeSessionName(merged.tmux?.sessionName || merged.zellij?.sessionName || task.name);
+            const sessionName = this.getSessionName(merged, task.name);
             const remoteCommand = this.buildBashCommand(task.path, sessionName, merged);
             return { command: buildSshCommand(remote, remoteCommand, true) };
         }
@@ -763,9 +763,7 @@ export class ConfigManager {
         const wslPath = this.toWslPath(folderPath);
         const windowsPath = this.toWindowsPath(folderPath);
 
-        // Sanitize session name for multiplexer (alphanumeric, underscores, dashes only)
-        // Check both tmux and zellij session names (they're mutually exclusive)
-        const sessionName = this.sanitizeSessionName(profile.tmux?.sessionName || profile.zellij?.sessionName || taskName);
+        const sessionName = this.getSessionName(profile, taskName);
 
         let command = '';
         let shellOptions: { executable?: string; args?: string[] } | undefined;
@@ -929,10 +927,8 @@ export class ConfigManager {
         }
     }
 
-    private sanitizeSessionName(name: string): string {
-        return name
-            .replace(/[^a-zA-Z0-9_-]/g, '_')
-            .substring(0, 50);
+    private getSessionName(profile: Profile, taskName: string): string {
+        return profile.tmux?.sessionName || profile.zellij?.sessionName || taskName;
     }
 
     // =========================================================================

@@ -942,24 +942,45 @@ export function activate(context: vscode.ExtensionContext) {
             : `${kind}@${normalizedRemoteId}: ${sessionName}`;
     };
 
+    const getLegacySanitizedSessionName = (sessionName: string): string =>
+        sessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
+
     const getTaskTerminalName = (task: TerminalTaskItem): string => {
         const remoteId = getTaskRemoteId(task);
         const profile = configManager.getProfile(task.profileId || 'wsl-default');
         if (profile?.tmux?.enabled || task.overrides?.tmux?.enabled) {
             const sessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
-            return getSessionTerminalName('tmux', sessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50), remoteId);
+            return getSessionTerminalName('tmux', sessionName, remoteId);
         }
         if (profile?.zellij?.enabled || task.overrides?.zellij?.enabled) {
             const sessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
-            return getSessionTerminalName('zellij', sessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50), remoteId);
+            return getSessionTerminalName('zellij', sessionName, remoteId);
         }
         return remoteId === LOCAL_REMOTE_ID ? task.name : `${remoteId}: ${task.name}`;
+    };
+
+    const getLegacyTaskTerminalName = (task: TerminalTaskItem): string | undefined => {
+        const remoteId = getTaskRemoteId(task);
+        const profile = configManager.getProfile(task.profileId || 'wsl-default');
+        if (profile?.tmux?.enabled || task.overrides?.tmux?.enabled) {
+            const sessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
+            const legacySessionName = getLegacySanitizedSessionName(sessionName);
+            return legacySessionName === sessionName ? undefined : getSessionTerminalName('tmux', legacySessionName, remoteId);
+        }
+        if (profile?.zellij?.enabled || task.overrides?.zellij?.enabled) {
+            const sessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
+            const legacySessionName = getLegacySanitizedSessionName(sessionName);
+            return legacySessionName === sessionName ? undefined : getSessionTerminalName('zellij', legacySessionName, remoteId);
+        }
+        return undefined;
     };
 
     // Helper to run a task, respecting terminal location setting
     const runTaskDirectly = async (task: TerminalTaskItem) => {
         const terminalName = getTaskTerminalName(task);
+        const legacyTerminalName = getLegacyTaskTerminalName(task);
         const existingTerminal = findTerminalByName(terminalName) ||
+            (legacyTerminalName ? findTerminalByName(legacyTerminalName) : undefined) ||
             (getTaskRemoteId(task) === LOCAL_REMOTE_ID ? findTerminalByName(task.name) : undefined);
         if (existingTerminal) {
             // Fast path: focusing an existing VS Code terminal should not touch tmux/zellij.
@@ -975,8 +996,7 @@ export function activate(context: vscode.ExtensionContext) {
         const taskProfile = configManager.getProfile(task.profileId || 'wsl-default');
         const taskUsesZellij = taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled;
         if (taskUsesZellij) {
-            const rawName = task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name;
-            const sessionName = rawName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
+            const sessionName = task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name;
             const remote = configManager.getTaskRemote(task);
             if (ZellijManager.isSessionExited(sessionName, remote)) {
                 ZellijManager.deleteSessionSync(sessionName, remote);
@@ -1601,11 +1621,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
 
                 // Get the tmux session name (custom or task name)
-                // IMPORTANT: Sanitize the same way configManager does when creating sessions
-                const rawSessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
-                sessionName = rawSessionName
-                    .replace(/[^a-zA-Z0-9_-]/g, '_')
-                    .substring(0, 50);
+                sessionName = task.overrides?.tmux?.sessionName || profile?.tmux?.sessionName || task.name;
             } else {
                 return;
             }
@@ -1784,11 +1800,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
 
                 // Get the zellij session name (custom or task name)
-                // IMPORTANT: Sanitize the same way configManager does when creating sessions
-                const rawSessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
-                sessionName = rawSessionName
-                    .replace(/[^a-zA-Z0-9_-]/g, '_')
-                    .substring(0, 50);
+                sessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
             } else {
                 return;
             }
@@ -1894,10 +1906,7 @@ export function activate(context: vscode.ExtensionContext) {
                 }
 
                 // Get the zellij session name (custom or task name)
-                const rawSessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
-                sessionName = rawSessionName
-                    .replace(/[^a-zA-Z0-9_-]/g, '_')
-                    .substring(0, 50);
+                sessionName = task.overrides?.zellij?.sessionName || profile?.zellij?.sessionName || task.name;
             } else {
                 return;
             }
