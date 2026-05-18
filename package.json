@@ -100,6 +100,11 @@
         "icon": "$(add)"
       },
       {
+        "command": "terminalWorkspaces.deleteRemote",
+        "title": "Delete Remote",
+        "icon": "$(trash)"
+      },
+      {
         "command": "terminalWorkspaces.addBrowseFolder",
         "title": "Terminal Workspaces: Browse for Folder",
         "icon": "$(folder-opened)"
@@ -399,6 +404,11 @@
           "command": "terminalWorkspaces.addTaskToRemote",
           "when": "view == terminalWorkspacesView && viewItem == remoteHeader",
           "group": "2_add@1"
+        },
+        {
+          "command": "terminalWorkspaces.deleteRemote",
+          "when": "view == terminalWorkspacesView && viewItem == remoteHeader",
+          "group": "9_delete@1"
         },
         {
           "command": "terminalWorkspaces.runTask",

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { RemoteConfig } from './types';
-import { buildSshCommand, normalizeRemoteId, shellQuote } from './remoteUtils';
+import { buildSshCommand, buildSshArgs, normalizeRemoteId, shellQuote, sshValueQuote } from './remoteUtils';
 
 export interface TmuxSession {
     /** Session name */
@@ -49,7 +49,13 @@ export class TmuxManager {
             let output: string;
 
             if (remote?.type === 'ssh') {
-                output = execSync(buildSshCommand(remote, `tmux list-sessions -F ${shellQuote(format)} 2>/dev/null || true`, false), {
+                // Use execFileSync (no shell) so Windows cmd.exe single-quote issues are avoided.
+                // Prepend common user-local bin dirs so tmux is found even when the remote
+                // non-interactive shell doesn't source .zshrc/.bashrc (where PATH is usually set).
+                const pathPrefix = 'export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"';
+                const innerCmd = `tmux list-sessions -F ${shellQuote(format)} 2>/dev/null || true`;
+                const remoteCmd = `${pathPrefix}; ${innerCmd}`;
+                output = execFileSync('ssh', buildSshArgs(remote, remoteCmd, false), {
                     encoding: 'utf8',
                     stdio: 'pipe',
                     timeout: 5000
@@ -112,22 +118,20 @@ export class TmuxManager {
      * Attach to a tmux session (returns command string)
      */
     static getAttachCommand(sessionName: string, remote?: RemoteConfig): string {
-        const command = `tmux attach-session -t ${shellQuote(sessionName)}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, true);
+            return buildSshCommand(remote, `tmux attach-session -t ${sshValueQuote(sessionName)}`, true);
         }
-        return command;
+        return `tmux attach-session -t ${shellQuote(sessionName)}`;
     }
 
     /**
      * Kill a tmux session (returns command string)
      */
     static getKillCommand(sessionName: string, remote?: RemoteConfig): string {
-        const command = `tmux kill-session -t ${shellQuote(sessionName)}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, false);
+            return buildSshCommand(remote, `tmux kill-session -t ${sshValueQuote(sessionName)}`, false);
         }
-        return command;
+        return `tmux kill-session -t ${shellQuote(sessionName)}`;
     }
 
     /**
@@ -170,6 +174,29 @@ export class TmuxManager {
             return `${drive}:\\${subPath}`;
         }
         return wslPath;
+    }
+
+    /**
+     * Kill all tmux sessions on a remote (used when deleting a remote).
+     * Uses execFileSync to avoid Windows cmd.exe shell-quoting issues.
+     */
+    static deleteAllSessionsSync(remote: RemoteConfig): void {
+        try {
+            const sessions = this.getSessions(remote);
+            if (sessions.length === 0) { return; }
+            const pathPrefix = 'export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"';
+            for (const session of sessions) {
+                const quoted = shellQuote(session.name);
+                const innerCmd = `${pathPrefix}; tmux kill-session -t ${quoted} 2>/dev/null`;
+                try {
+                    execFileSync('ssh', buildSshArgs(remote, innerCmd, false), { stdio: 'pipe', timeout: 5000 });
+                } catch {
+                    // ignore per-session errors
+                }
+            }
+        } catch {
+            // ignore
+        }
     }
 
     private static shouldUseLocalCommand(): boolean {

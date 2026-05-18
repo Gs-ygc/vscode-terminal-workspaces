@@ -29,6 +29,12 @@ export interface RemoteConfig {
     host?: string;
     /** Extra SSH arguments, for example ["-p", "2222"] */
     sshArgs?: string[];
+    /**
+     * Login shell to use on the remote host, for example "bash" or "zsh".
+     * Defaults to "$SHELL" (evaluated on the remote side), which picks up the
+     * user's configured login shell and its rc files (-ic mode).
+     */
+    shell?: string;
 }
 
 export interface TerminalColor {

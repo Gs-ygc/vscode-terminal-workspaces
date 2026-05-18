@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
-import { execSync } from 'child_process';
+import { execSync, execFileSync } from 'child_process';
 import { RemoteConfig } from './types';
-import { buildSshCommand, normalizeRemoteId, shellQuote } from './remoteUtils';
+import { buildSshCommand, buildSshArgs, normalizeRemoteId, shellQuote, sshValueQuote } from './remoteUtils';
 
 export interface ZellijSession {
     /** Session name */
@@ -49,7 +49,12 @@ export class ZellijManager {
             let output: string;
 
             if (remote?.type === 'ssh') {
-                output = execSync(buildSshCommand(remote, 'zellij list-sessions 2>/dev/null || true', false), {
+                // Use execFileSync (no shell) so Windows cmd.exe single-quote issues are avoided.
+                // Prepend common user-local bin dirs so zellij is found even when the remote
+                // non-interactive shell doesn't source .zshrc/.bashrc (where PATH is usually set).
+                const pathPrefix = 'export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"';
+                const remoteCmd = `${pathPrefix}; zellij list-sessions 2>/dev/null || true`;
+                output = execFileSync('ssh', buildSshArgs(remote, remoteCmd, false), {
                     encoding: 'utf8',
                     stdio: 'pipe',
                     timeout: 5000
@@ -123,22 +128,20 @@ export class ZellijManager {
      * Get command to attach to a zellij session
      */
     static getAttachCommand(sessionName: string, remote?: RemoteConfig): string {
-        const command = `zellij attach ${shellQuote(sessionName)}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, true);
+            return buildSshCommand(remote, `zellij attach ${sshValueQuote(sessionName)}`, true);
         }
-        return command;
+        return `zellij attach ${shellQuote(sessionName)}`;
     }
 
     /**
      * Get command to create a new zellij session
      */
     static getNewSessionCommand(sessionName: string, remote?: RemoteConfig): string {
-        const command = `zellij -s ${shellQuote(sessionName)}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, true);
+            return buildSshCommand(remote, `zellij -s ${sshValueQuote(sessionName)}`, true);
         }
-        return command;
+        return `zellij -s ${shellQuote(sessionName)}`;
     }
 
     /**
@@ -147,12 +150,12 @@ export class ZellijManager {
      * so we use a shell conditional
      */
     static getAttachOrCreateCommand(sessionName: string, remote?: RemoteConfig): string {
-        const quoted = shellQuote(sessionName);
-        const command = `zellij attach ${quoted} 2>/dev/null || zellij -s ${quoted}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, true);
+            const q = sshValueQuote(sessionName);
+            return buildSshCommand(remote, `zellij attach ${q} 2>/dev/null || zellij -s ${q}`, true);
         }
-        return command;
+        const quoted = shellQuote(sessionName);
+        return `zellij attach ${quoted} 2>/dev/null || zellij -s ${quoted}`;
     }
 
     /**
@@ -161,11 +164,10 @@ export class ZellijManager {
      * (can be resurrected by attaching)
      */
     static getKillCommand(sessionName: string, remote?: RemoteConfig): string {
-        const command = `zellij kill-session ${shellQuote(sessionName)}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, false);
+            return buildSshCommand(remote, `zellij kill-session ${sshValueQuote(sessionName)}`, false);
         }
-        return command;
+        return `zellij kill-session ${shellQuote(sessionName)}`;
     }
 
     /**
@@ -173,13 +175,12 @@ export class ZellijManager {
      * Note: delete-session fully removes the session (cannot be resurrected)
      */
     static getDeleteCommand(sessionName: string, remote?: RemoteConfig): string {
-        const quoted = shellQuote(sessionName);
-        // Kill first (in case session is still running), then delete
-        const command = `zellij kill-session ${quoted} 2>/dev/null; zellij delete-session ${quoted}`;
         if (remote?.type === 'ssh') {
-            return buildSshCommand(remote, command, false);
+            const q = sshValueQuote(sessionName);
+            return buildSshCommand(remote, `zellij kill-session ${q} 2>/dev/null; zellij delete-session ${q}`, false);
         }
-        return command;
+        const quoted = shellQuote(sessionName);
+        return `zellij kill-session ${quoted} 2>/dev/null; zellij delete-session ${quoted}`;
     }
 
     /**
@@ -254,6 +255,29 @@ export class ZellijManager {
             execSync(cmd, { stdio: 'pipe', timeout: 5000 });
         } catch {
             // Ignore errors - session may already be gone
+        }
+    }
+
+    /**
+     * Delete all zellij sessions on a remote (used when deleting a remote).
+     * Uses execFileSync to avoid Windows cmd.exe shell-quoting issues.
+     */
+    static deleteAllSessionsSync(remote: RemoteConfig): void {
+        try {
+            const sessions = this.getSessions(remote);
+            if (sessions.length === 0) { return; }
+            const pathPrefix = 'export PATH="$HOME/.local/bin:$HOME/bin:/usr/local/bin:$PATH"';
+            for (const session of sessions) {
+                const quoted = shellQuote(session.name);
+                const innerCmd = `${pathPrefix}; zellij kill-session ${quoted} 2>/dev/null; zellij delete-session ${quoted} 2>/dev/null`;
+                try {
+                    execFileSync('ssh', buildSshArgs(remote, innerCmd, false), { stdio: 'pipe', timeout: 5000 });
+                } catch {
+                    // ignore per-session errors
+                }
+            }
+        } catch {
+            // ignore
         }
     }
 
