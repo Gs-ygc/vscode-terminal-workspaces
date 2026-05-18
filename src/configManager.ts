@@ -77,6 +77,21 @@ export class ConfigManager {
         return this.layerMode === 'remote';
     }
 
+    getLayerHostRemote(): RemoteConfig {
+        if ((this.layerMode === 'remote' || this.layerMode === 'workspace') && this.isRunningInUiHostForSshRemote()) {
+            const sshHost = this.getCurrentSshRemoteHost();
+            if (sshHost) {
+                return {
+                    id: LOCAL_REMOTE_ID,
+                    label: 'Host',
+                    type: 'ssh',
+                    host: sshHost
+                };
+            }
+        }
+        return createLocalRemote();
+    }
+
     async setLayerMode(mode: LayerMode): Promise<TerminalTasksConfig> {
         this.layerMode = mode;
         this.executionMode = this.getExecutionModeForLayer(mode);
@@ -103,6 +118,23 @@ export class ConfigManager {
 
     private getExecutionModeForLayer(mode: LayerMode): ExecutionMode {
         return mode === 'ui' ? 'ui' : 'workspace';
+    }
+
+    private isRunningInUiHostForSshRemote(): boolean {
+        return !!this.getCurrentSshRemoteHost() && vscode.workspace.workspaceFolders?.[0]?.uri.scheme === 'vscode-remote';
+    }
+
+    private getCurrentSshRemoteHost(): string | undefined {
+        const authority = vscode.workspace.workspaceFolders?.[0]?.uri.authority;
+        if (!authority?.startsWith('ssh-remote+')) {
+            return undefined;
+        }
+        const encodedHost = authority.substring('ssh-remote+'.length);
+        try {
+            return decodeURIComponent(encodedHost);
+        } catch {
+            return encodedHost;
+        }
     }
 
     /**

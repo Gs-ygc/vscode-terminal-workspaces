@@ -1200,6 +1200,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     const getTaskRemoteId = (task: TerminalTaskItem): string => normalizeRemoteId(task.remoteId);
 
+    const getSessionRemote = (session: TmuxSession | ZellijSession): RemoteConfig => {
+        if (normalizeRemoteId(session.remoteId) === LOCAL_REMOTE_ID) {
+            return configManager.getLayerHostRemote();
+        }
+        return configManager.getRemote(session.remoteId);
+    };
+
     const getSessionTerminalName = (kind: 'tmux' | 'zellij', sessionName: string, remoteId?: string): string => {
         const normalizedRemoteId = normalizeRemoteId(remoteId);
         return normalizedRemoteId === LOCAL_REMOTE_ID
@@ -1812,7 +1819,7 @@ export function activate(context: vscode.ExtensionContext) {
             }
 
             // Check if terminal with this name already exists
-            const remote = configManager.getRemote(session.remoteId);
+            const remote = getSessionRemote(session);
             const terminalName = getSessionTerminalName('tmux', session.name, remote.id);
             const existingTerminal = findManagedTerminalByName(terminalName);
             if (existingTerminal) {
@@ -2276,7 +2283,7 @@ export function activate(context: vscode.ExtensionContext) {
                 return;
             }
 
-            const remote = configManager.getRemote(session.remoteId);
+            const remote = getSessionRemote(session);
 
             // Warn if session is EXITED — resurrection will re-run the last command which may fail
             let createFresh = false;
@@ -2498,7 +2505,7 @@ export function activate(context: vscode.ExtensionContext) {
             const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
 
             for (const session of untrackedSessions) {
-                const remote = configManager.getRemote(session.remoteId);
+                const remote = getSessionRemote(session);
                 await openMultiplexerTerminal('zellij', session.name, remote, { show: terminalLocation !== 'editor' });
             }
 
@@ -2647,7 +2654,7 @@ export function activate(context: vscode.ExtensionContext) {
             const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
 
             for (const session of untrackedSessions) {
-                const remote = configManager.getRemote(session.remoteId);
+                const remote = getSessionRemote(session);
                 await openMultiplexerTerminal('tmux', session.name, remote, { show: false });
             }
 

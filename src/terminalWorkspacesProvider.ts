@@ -378,7 +378,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
 
     private getVisibleRemotes(remotes: RemoteConfig[]): RemoteConfig[] {
         if (this.configManager.isRemoteLayer() || this.configManager.isWorkspaceLayer()) {
-            return remotes.filter(remote => remote.type !== 'ssh');
+            return [this.configManager.getLayerHostRemote()];
         }
         return remotes;
     }
@@ -839,6 +839,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         item.description = TmuxManager.normalizePathForDisplay(session.path);
         item.tooltip = [
             `Session: ${session.name}`,
+            session.remoteLabel ? `Host: ${session.remoteLabel}` : '',
             `Path: ${session.path}`,
             `Windows: ${session.windowCount}`,
             `Status: ${session.attached ? 'Attached' : 'Detached'}`,
@@ -893,6 +894,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             item.description = '(EXITED)';
             item.tooltip = [
                 `Session: ${session.name}`,
+                session.remoteLabel ? `Host: ${session.remoteLabel}` : '',
                 'Status: EXITED',
                 '',
                 'Attaching will resurrect with the last running command.',
@@ -909,6 +911,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
             item.description = session.path || '';
             item.tooltip = [
                 `Session: ${session.name}`,
+                session.remoteLabel ? `Host: ${session.remoteLabel}` : '',
                 session.path ? `Path: ${session.path}` : '',
                 '',
                 'Click to focus or attach. Right-click to import as task.'
