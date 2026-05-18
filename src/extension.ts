@@ -144,6 +144,16 @@ interface SshConfigHost {
     source: string;
 }
 
+function getCurrentExtensionKind(): vscode.ExtensionKind | undefined {
+    return vscode.extensions.getExtension('cybersader.terminal-workspaces')?.extensionKind;
+}
+
+function getSshConfigSourceLabel(): string {
+    return getCurrentExtensionKind() === vscode.ExtensionKind.UI
+        ? 'Local UI SSH config'
+        : 'Remote/workspace SSH config';
+}
+
 function parseSshConfig(content: string, source: string): SshConfigHost[] {
     const hosts: SshConfigHost[] = [];
     let current: SshConfigHost[] = [];
@@ -421,8 +431,10 @@ export function activate(context: vscode.ExtensionContext) {
         async () => {
             const config = await configManager.getConfig();
             const sshConfigHosts = getSshConfigHosts();
+            const sourceLabel = getSshConfigSourceLabel();
+            const isWorkspaceHost = getCurrentExtensionKind() === vscode.ExtensionKind.Workspace;
             const items: (vscode.QuickPickItem & {
-                action: 'manual' | 'sshConfig';
+                action: 'manual' | 'sshConfig' | 'info';
                 sshHost?: SshConfigHost;
                 existing?: RemoteConfig;
             })[] = [
@@ -440,26 +452,45 @@ export function activate(context: vscode.ExtensionContext) {
                     action: 'manual'
                 });
 
+                if (isWorkspaceHost) {
+                    items.push({
+                        label: '$(info) Showing remote/workspace SSH config',
+                        description: 'Local Windows SSH config is not readable from this extension host',
+                        detail: 'Use manual entry, or install/run the extension in the local UI extension host.',
+                        action: 'info'
+                    });
+                }
+
                 for (const sshHost of sshConfigHosts) {
                     const existing = findDuplicateRemote(config.remotes, sshHost.alias, sshHost.alias);
                     items.push({
                         label: `$(server-environment) ${sshHost.alias}`,
                         description: existing ? 'Already added' : sshHost.hostName || 'SSH config',
-                        detail: sshHost.user ? `User ${sshHost.user}` : sshHost.source,
+                        detail: `${sourceLabel}: ${sshHost.user ? `User ${sshHost.user}` : sshHost.source}`,
                         action: 'sshConfig',
                         sshHost,
                         existing
                     });
                 }
+            } else if (isWorkspaceHost) {
+                items.push({
+                    label: '$(info) No remote/workspace SSH config found',
+                    description: 'Local Windows SSH config is not readable from this extension host',
+                    detail: 'Use manual entry, or install/run the extension in the local UI extension host.',
+                    action: 'info'
+                });
             }
 
             const selected = await vscode.window.showQuickPick(items, {
-                placeHolder: 'Add SSH remote',
+                placeHolder: `Add SSH remote (${sourceLabel})`,
                 matchOnDescription: true,
                 matchOnDetail: true
             });
 
             if (!selected) {
+                return;
+            }
+            if (selected.action === 'info') {
                 return;
             }
 
