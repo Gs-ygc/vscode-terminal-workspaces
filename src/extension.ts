@@ -11,6 +11,16 @@ import { LOCAL_REMOTE_ID, normalizeRemoteId } from './remoteUtils';
 
 let treeDataProvider: TerminalTasksProvider;
 let configManager: ConfigManager;
+let extensionIsDeactivating = false;
+
+const OPEN_MULTIPLEXER_TERMINALS_KEY = 'terminalWorkspaces.openMultiplexerTerminals.v1';
+
+interface OpenMultiplexerTerminal {
+    kind: 'tmux' | 'zellij';
+    sessionName: string;
+    remoteId: string;
+    terminalName: string;
+}
 
 function shouldUseLocalMultiplexerCommand(): boolean {
     return vscode.env.remoteName !== undefined || process.platform !== 'win32';
@@ -202,6 +212,7 @@ function findDuplicateRemote(remotes: RemoteConfig[], host: string, label: strin
 }
 
 export function activate(context: vscode.ExtensionContext) {
+    extensionIsDeactivating = false;
     console.log('Terminal Workspaces is now active');
 
     configManager = new ConfigManager(context);
@@ -282,7 +293,10 @@ export function activate(context: vscode.ExtensionContext) {
     const terminalOpenListener = vscode.window.onDidOpenTerminal(() => {
         scheduleTerminalRefresh();
     });
-    const terminalCloseListener = vscode.window.onDidCloseTerminal(() => {
+    const terminalCloseListener = vscode.window.onDidCloseTerminal(terminal => {
+        if (!extensionIsDeactivating && !suppressTerminalCloseForget) {
+            void forgetOpenMultiplexerTerminal(terminal.name);
+        }
         scheduleTerminalRefresh();
     });
     context.subscriptions.push(selectionOpenListener, terminalOpenListener, terminalCloseListener);
@@ -951,6 +965,32 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     const managedTerminals = new WeakSet<vscode.Terminal>();
+    let suppressTerminalCloseForget = false;
+
+    const getOpenMultiplexerTerminals = (): OpenMultiplexerTerminal[] => {
+        return context.workspaceState.get<OpenMultiplexerTerminal[]>(OPEN_MULTIPLEXER_TERMINALS_KEY, []);
+    };
+
+    const updateOpenMultiplexerTerminals = async (entries: OpenMultiplexerTerminal[]) => {
+        const deduped = new Map<string, OpenMultiplexerTerminal>();
+        for (const entry of entries) {
+            deduped.set(entry.terminalName, entry);
+        }
+        await context.workspaceState.update(OPEN_MULTIPLEXER_TERMINALS_KEY, [...deduped.values()]);
+    };
+
+    const rememberOpenMultiplexerTerminal = async (entry: OpenMultiplexerTerminal) => {
+        await updateOpenMultiplexerTerminals([
+            ...getOpenMultiplexerTerminals().filter(existing => existing.terminalName !== entry.terminalName),
+            entry
+        ]);
+    };
+
+    const forgetOpenMultiplexerTerminal = async (terminalName: string) => {
+        await updateOpenMultiplexerTerminals(
+            getOpenMultiplexerTerminals().filter(entry => entry.terminalName !== terminalName)
+        );
+    };
 
     const createManagedTerminal = (options: vscode.TerminalOptions): vscode.Terminal => {
         const terminal = vscode.window.createTerminal({
@@ -973,14 +1013,102 @@ export function activate(context: vscode.ExtensionContext) {
     };
 
     const disposeRestoredMultiplexerTerminals = () => {
-        for (const terminal of vscode.window.terminals) {
-            if (!managedTerminals.has(terminal) && isMultiplexerTerminalName(terminal.name)) {
-                terminal.dispose();
+        suppressTerminalCloseForget = true;
+        try {
+            for (const terminal of vscode.window.terminals) {
+                if (!managedTerminals.has(terminal) && isMultiplexerTerminalName(terminal.name)) {
+                    terminal.dispose();
+                }
             }
+        } finally {
+            setTimeout(() => {
+                suppressTerminalCloseForget = false;
+            }, 500);
         }
     };
 
     disposeRestoredMultiplexerTerminals();
+
+    const sendAttachCommand = (terminal: vscode.Terminal, kind: 'tmux' | 'zellij', sessionName: string, remote: RemoteConfig, createFresh = false): void => {
+        if (kind === 'tmux') {
+            if (remote.type === 'ssh') {
+                terminal.sendText(TmuxManager.getAttachCommand(sessionName, remote));
+            } else if (shouldUseLocalMultiplexerCommand()) {
+                terminal.sendText(TmuxManager.getAttachCommand(sessionName));
+            } else {
+                terminal.sendText(TmuxManager.getAttachCommandForWSL(sessionName));
+            }
+            return;
+        }
+
+        if (createFresh) {
+            if (remote.type === 'ssh') {
+                terminal.sendText(ZellijManager.getNewSessionCommand(sessionName, remote));
+            } else if (shouldUseLocalMultiplexerCommand()) {
+                terminal.sendText(ZellijManager.getNewSessionCommand(sessionName));
+            } else {
+                terminal.sendText(ZellijManager.getNewSessionCommandForWSL(sessionName));
+            }
+            return;
+        }
+
+        if (remote.type === 'ssh') {
+            terminal.sendText(ZellijManager.getAttachCommand(sessionName, remote));
+        } else if (shouldUseLocalMultiplexerCommand()) {
+            terminal.sendText(ZellijManager.getAttachCommand(sessionName));
+        } else {
+            terminal.sendText(ZellijManager.getAttachCommandForWSL(sessionName));
+        }
+    };
+
+    const openMultiplexerTerminal = async (
+        kind: 'tmux' | 'zellij',
+        sessionName: string,
+        remote: RemoteConfig,
+        options: { show?: boolean; createFresh?: boolean; remember?: boolean } = {}
+    ): Promise<vscode.Terminal> => {
+        const terminalName = getSessionTerminalName(kind, sessionName, remote.id);
+        disposeRestoredTerminalByName(terminalName);
+
+        const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
+        const terminal = createManagedTerminal({
+            name: terminalName,
+            location: terminalLocation === 'editor'
+                ? vscode.TerminalLocation.Editor
+                : vscode.TerminalLocation.Panel
+        });
+
+        terminal.show(options.show === false ? false : true);
+        sendAttachCommand(terminal, kind, sessionName, remote, options.createFresh);
+
+        if (options.remember !== false) {
+            await rememberOpenMultiplexerTerminal({
+                kind,
+                sessionName,
+                remoteId: remote.id,
+                terminalName
+            });
+        }
+
+        return terminal;
+    };
+
+    const restoreOpenMultiplexerTerminals = async () => {
+        const restoredEntries = getOpenMultiplexerTerminals()
+            .filter(entry => entry.kind === 'tmux' || entry.kind === 'zellij');
+        if (restoredEntries.length === 0) {
+            return;
+        }
+
+        for (const entry of restoredEntries) {
+            if (findManagedTerminalByName(entry.terminalName)) {
+                continue;
+            }
+
+            const remote = configManager.getRemote(entry.remoteId);
+            await openMultiplexerTerminal(entry.kind, entry.sessionName, remote, { show: false, remember: true });
+        }
+    };
 
     const getTaskRemoteId = (task: TerminalTaskItem): string => normalizeRemoteId(task.remoteId);
 
@@ -990,6 +1118,8 @@ export function activate(context: vscode.ExtensionContext) {
             ? `${kind}: ${sessionName}`
             : `${kind}@${normalizedRemoteId}: ${sessionName}`;
     };
+
+    void restoreOpenMultiplexerTerminals();
 
     const getLegacySanitizedSessionName = (sessionName: string): string =>
         sessionName.replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 50);
@@ -1032,6 +1162,12 @@ export function activate(context: vscode.ExtensionContext) {
         const taskUsesTmux = taskProfile?.tmux?.enabled || task.overrides?.tmux?.enabled;
         const taskUsesZellij = !taskUsesTmux && (taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled);
         const taskUsesMultiplexer = taskUsesTmux || taskUsesZellij;
+        const multiplexerKind: 'tmux' | 'zellij' | undefined = taskUsesTmux ? 'tmux' : taskUsesZellij ? 'zellij' : undefined;
+        const multiplexerSessionName = taskUsesTmux
+            ? task.overrides?.tmux?.sessionName || taskProfile?.tmux?.sessionName || task.name
+            : taskUsesZellij
+                ? task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name
+                : undefined;
         const candidateNames = [
             terminalName,
             legacyTerminalName,
@@ -1076,6 +1212,14 @@ export function activate(context: vscode.ExtensionContext) {
 
         terminal.show();
         terminal.sendText(generated.command);
+        if (multiplexerKind && multiplexerSessionName) {
+            await rememberOpenMultiplexerTerminal({
+                kind: multiplexerKind,
+                sessionName: multiplexerSessionName,
+                remoteId: getTaskRemoteId(task),
+                terminalName
+            });
+        }
     };
 
     const runTaskByIdCommand = vscode.commands.registerCommand(
@@ -1583,30 +1727,7 @@ export function activate(context: vscode.ExtensionContext) {
                 existingTerminal.show();
                 return;
             }
-            disposeRestoredTerminalByName(terminalName);
-
-            // Create terminal - don't set cwd since tmux will handle the working directory
-            // The session's path might not exist on the Windows side or could be invalid
-            const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
-            const terminal = createManagedTerminal({
-                name: terminalName,
-                // Intentionally not setting cwd - tmux attach will restore the session's directory
-                location: terminalLocation === 'editor'
-                    ? vscode.TerminalLocation.Editor
-                    : vscode.TerminalLocation.Panel
-            });
-
-            terminal.show();
-
-            // Send the attach command - tmux will restore the session's working directory
-            if (remote.type === 'ssh') {
-                terminal.sendText(TmuxManager.getAttachCommand(session.name, remote));
-            } else if (shouldUseLocalMultiplexerCommand()) {
-                terminal.sendText(TmuxManager.getAttachCommand(session.name));
-            } else {
-                // On Windows, need to go through WSL with proper escaping
-                terminal.sendText(TmuxManager.getAttachCommandForWSL(session.name));
-            }
+            await openMultiplexerTerminal('tmux', session.name, remote);
         }
     );
 
@@ -2092,37 +2213,7 @@ export function activate(context: vscode.ExtensionContext) {
                     // Terminal was disposed, fall through to create a new one
                 }
             }
-            disposeRestoredTerminalByName(terminalName);
-
-            // Create terminal - don't set cwd since zellij will handle the working directory
-            const terminalLocation = vscode.workspace.getConfiguration('terminalWorkspaces').get<string>('terminalLocation', 'panel');
-            const terminal = createManagedTerminal({
-                name: terminalName,
-                location: terminalLocation === 'editor'
-                    ? vscode.TerminalLocation.Editor
-                    : vscode.TerminalLocation.Panel
-            });
-
-            terminal.show();
-
-            // Send the appropriate command
-            if (createFresh) {
-                // Create a fresh session (old one was deleted)
-                if (remote.type === 'ssh') {
-                    terminal.sendText(ZellijManager.getNewSessionCommand(session.name, remote));
-                } else if (shouldUseLocalMultiplexerCommand()) {
-                    terminal.sendText(ZellijManager.getNewSessionCommand(session.name));
-                } else {
-                    terminal.sendText(ZellijManager.getNewSessionCommandForWSL(session.name));
-                }
-            } else if (remote.type === 'ssh') {
-                terminal.sendText(ZellijManager.getAttachCommand(session.name, remote));
-            } else if (shouldUseLocalMultiplexerCommand()) {
-                terminal.sendText(ZellijManager.getAttachCommand(session.name));
-            } else {
-                // On Windows, need to go through WSL with proper escaping
-                terminal.sendText(ZellijManager.getAttachCommandForWSL(session.name));
-            }
+            await openMultiplexerTerminal('zellij', session.name, remote, { createFresh });
         }
     );
 
@@ -2315,25 +2406,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             for (const session of untrackedSessions) {
                 const remote = configManager.getRemote(session.remoteId);
-                const terminalName = getSessionTerminalName('zellij', session.name, remote.id);
-                disposeRestoredTerminalByName(terminalName);
-                const terminal = createManagedTerminal({
-                    name: terminalName,
-                    location: terminalLocation === 'editor'
-                        ? vscode.TerminalLocation.Editor
-                        : vscode.TerminalLocation.Panel
-                });
-
-                terminal.show();
-
-                if (remote.type === 'ssh') {
-                    terminal.sendText(ZellijManager.getAttachCommand(session.name, remote));
-                } else if (shouldUseLocalMultiplexerCommand()) {
-                    terminal.sendText(ZellijManager.getAttachCommand(session.name));
-                } else {
-                    // On Windows, need to go through WSL with proper escaping
-                    terminal.sendText(ZellijManager.getAttachCommandForWSL(session.name));
-                }
+                await openMultiplexerTerminal('zellij', session.name, remote, { show: terminalLocation !== 'editor' });
             }
 
             vscode.window.showInformationMessage(`Attached to ${untrackedSessions.length} zellij session(s)`);
@@ -2482,26 +2555,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             for (const session of untrackedSessions) {
                 const remote = configManager.getRemote(session.remoteId);
-                // Don't set cwd - tmux will restore the session's working directory
-                const terminalName = getSessionTerminalName('tmux', session.name, remote.id);
-                disposeRestoredTerminalByName(terminalName);
-                const terminal = createManagedTerminal({
-                    name: terminalName,
-                    location: terminalLocation === 'editor'
-                        ? vscode.TerminalLocation.Editor
-                        : vscode.TerminalLocation.Panel
-                });
-
-                terminal.show(false); // Don't steal focus for subsequent terminals
-
-                if (remote.type === 'ssh') {
-                    terminal.sendText(TmuxManager.getAttachCommand(session.name, remote));
-                } else if (shouldUseLocalMultiplexerCommand()) {
-                    terminal.sendText(TmuxManager.getAttachCommand(session.name));
-                } else {
-                    // On Windows, need to go through WSL with proper escaping
-                    terminal.sendText(TmuxManager.getAttachCommandForWSL(session.name));
-                }
+                await openMultiplexerTerminal('tmux', session.name, remote, { show: false });
             }
 
             vscode.window.showInformationMessage(`Attached to ${untrackedSessions.length} tmux session(s)`);
@@ -2701,4 +2755,6 @@ function getAllTasks(items: (TerminalTaskItem | TaskFolder)[]): TerminalTaskItem
     return tasks;
 }
 
-export function deactivate() {}
+export function deactivate() {
+    extensionIsDeactivating = true;
+}
