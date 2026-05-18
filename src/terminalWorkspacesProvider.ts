@@ -41,6 +41,9 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     private cachedUntrackedZellijSessions: Map<string, ZellijSession[]> = new Map();
     private allTmuxSessions: Map<string, TmuxSession[]> = new Map();
     private allZellijSessions: Map<string, ZellijSession[]> = new Map();
+    private sshSessionRefreshInFlight: Set<string> = new Set();
+    private sshSessionRefreshAt: Map<string, number> = new Map();
+    private static readonly SSH_SESSION_CACHE_TTL_MS = 15000;
 
     // Cache of active tmux session names (refreshed on each tree refresh)
     // Used to verify if a tmux session actually exists vs just a VS Code terminal
@@ -84,6 +87,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     refresh(): void {
         this.cachedUntrackedTmuxSessions.clear();
         this.cachedUntrackedZellijSessions.clear();
+        this.sshSessionRefreshAt.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -92,6 +96,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      */
     refreshTmuxSessions(): void {
         this.cachedUntrackedTmuxSessions.clear(); // Clear cache to force refresh
+        this.sshSessionRefreshAt.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -100,6 +105,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
      */
     refreshZellijSessions(): void {
         this.cachedUntrackedZellijSessions.clear(); // Clear cache to force refresh
+        this.sshSessionRefreshAt.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -348,9 +354,20 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         this.refreshRemotesSync(localRemotes);
 
         // Async pass for SSH remotes — doesn't block getChildren
-        if (sshRemotes.length > 0) {
-            this.refreshRemotesAsync(sshRemotes);
+        const remotesToRefresh = sshRemotes.filter(remote => this.shouldRefreshSshRemote(remote));
+        if (remotesToRefresh.length > 0) {
+            this.refreshRemotesAsync(remotesToRefresh);
         }
+    }
+
+    private shouldRefreshSshRemote(remote: RemoteConfig): boolean {
+        const remoteId = normalizeRemoteId(remote.id);
+        if (this.sshSessionRefreshInFlight.has(remoteId)) {
+            return false;
+        }
+
+        const lastRefresh = this.sshSessionRefreshAt.get(remoteId) || 0;
+        return Date.now() - lastRefresh > TerminalTasksProvider.SSH_SESSION_CACHE_TTL_MS;
     }
 
     private refreshRemotesSync(remotes: RemoteConfig[]): void {
@@ -382,29 +399,36 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     private refreshRemotesAsync(remotes: RemoteConfig[]): void {
         Promise.all(remotes.map(async remote => {
             const remoteId = normalizeRemoteId(remote.id);
-            // tmux
-            const activeTmux = new Set<string>();
+            this.sshSessionRefreshInFlight.add(remoteId);
             try {
-                const sessions = await Promise.resolve(TmuxManager.getSessions(remote));
-                this.allTmuxSessions.set(remoteId, sessions);
-                for (const s of sessions) { activeTmux.add(s.name.toLowerCase()); }
-            } catch {
-                this.allTmuxSessions.set(remoteId, []);
+                await new Promise(resolve => setTimeout(resolve, 0));
+                // tmux
+                const activeTmux = new Set<string>();
+                try {
+                    const sessions = TmuxManager.getSessions(remote);
+                    this.allTmuxSessions.set(remoteId, sessions);
+                    for (const s of sessions) { activeTmux.add(s.name.toLowerCase()); }
+                } catch {
+                    this.allTmuxSessions.set(remoteId, []);
+                }
+                this.activeTmuxSessions.set(remoteId, activeTmux);
+                // zellij
+                const activeZellij = new Set<string>();
+                try {
+                    const sessions = ZellijManager.getSessions(remote);
+                    this.allZellijSessions.set(remoteId, sessions);
+                    for (const s of sessions) { activeZellij.add(s.name.toLowerCase()); }
+                } catch {
+                    this.allZellijSessions.set(remoteId, []);
+                }
+                this.activeZellijSessions.set(remoteId, activeZellij);
+                // Clear untracked caches for this remote so next render picks up fresh data
+                this.cachedUntrackedTmuxSessions.delete(remoteId);
+                this.cachedUntrackedZellijSessions.delete(remoteId);
+                this.sshSessionRefreshAt.set(remoteId, Date.now());
+            } finally {
+                this.sshSessionRefreshInFlight.delete(remoteId);
             }
-            this.activeTmuxSessions.set(remoteId, activeTmux);
-            // zellij
-            const activeZellij = new Set<string>();
-            try {
-                const sessions = await Promise.resolve(ZellijManager.getSessions(remote));
-                this.allZellijSessions.set(remoteId, sessions);
-                for (const s of sessions) { activeZellij.add(s.name.toLowerCase()); }
-            } catch {
-                this.allZellijSessions.set(remoteId, []);
-            }
-            this.activeZellijSessions.set(remoteId, activeZellij);
-            // Clear untracked caches for this remote so next render picks up fresh data
-            this.cachedUntrackedTmuxSessions.delete(remoteId);
-            this.cachedUntrackedZellijSessions.delete(remoteId);
         })).then(() => {
             // Re-render the tree now that SSH data is available
             this._onDidChangeTreeData.fire(undefined);
