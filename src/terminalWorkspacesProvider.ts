@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import * as path from 'path';
 import { ConfigManager } from './configManager';
 import { TaskItem, TerminalTaskItem, TaskFolder, Profile, RemoteConfig, TmuxMode, ZellijMode, BUILTIN_PROFILES } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
@@ -119,7 +120,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         if (!element) {
             // Root level - refresh the active multiplexer sessions cache
             // This ensures we check actual tmux/zellij session state, not just VS Code terminal existence
-            const remotes = config.remotes || this.configManager.getRemotes();
+            const remotes = this.getVisibleRemotes(config.remotes || this.configManager.getRemotes());
             this.refreshActiveSessionsCache(remotes);
 
             // Clear parent map on root refresh (rebuilt as tree items are created)
@@ -279,7 +280,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         const trackedSet = new Set(trackedNames.map(n => n.toLowerCase()));
         const allSessions = this.allTmuxSessions.get(remoteId) || [];
         const untracked = allSessions.filter(session =>
-            !trackedSet.has(session.name.toLowerCase())
+            !trackedSet.has(session.name.toLowerCase()) &&
+            this.isSessionVisibleInLayer(session, remoteId)
         );
         this.cachedUntrackedTmuxSessions.set(remoteId, untracked);
         return untracked;
@@ -324,7 +326,8 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         const trackedSet = new Set(trackedNames.map(n => n.toLowerCase()));
         const allSessions = this.allZellijSessions.get(remoteId) || [];
         const untracked = allSessions.filter(session =>
-            !trackedSet.has(session.name.toLowerCase())
+            !trackedSet.has(session.name.toLowerCase()) &&
+            this.isZellijSessionVisibleInLayer(remoteId)
         );
         this.cachedUntrackedZellijSessions.set(remoteId, untracked);
         return untracked;
@@ -347,13 +350,10 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         // Local remotes are queried synchronously (fast, no network).
         // SSH remotes are queried asynchronously so they never block tree rendering:
         // results are stored when ready and a tree refresh is triggered automatically.
-        const scanLocalHostSessions = this.shouldScanLocalHostSessions();
-        const localRemotes = scanLocalHostSessions
-            ? remotes.filter(r => r.type !== 'ssh')
-            : [];
+        const localRemotes = remotes.filter(r => r.type !== 'ssh');
         const sshRemotes = remotes.filter(r => r.type === 'ssh');
 
-        if (!scanLocalHostSessions) {
+        if (localRemotes.length === 0) {
             this.clearLocalHostSessionCache();
         }
 
@@ -367,10 +367,6 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         }
     }
 
-    private shouldScanLocalHostSessions(): boolean {
-        return !(this.configManager.getConfigMode() === 'user' && vscode.env.remoteName);
-    }
-
     private clearLocalHostSessionCache(): void {
         this.allTmuxSessions.set(LOCAL_REMOTE_ID, []);
         this.allZellijSessions.set(LOCAL_REMOTE_ID, []);
@@ -378,6 +374,48 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         this.activeZellijSessions.set(LOCAL_REMOTE_ID, new Set());
         this.cachedUntrackedTmuxSessions.delete(LOCAL_REMOTE_ID);
         this.cachedUntrackedZellijSessions.delete(LOCAL_REMOTE_ID);
+    }
+
+    private getVisibleRemotes(remotes: RemoteConfig[]): RemoteConfig[] {
+        if (this.configManager.isRemoteLayer() || this.configManager.isWorkspaceLayer()) {
+            return remotes.filter(remote => remote.type !== 'ssh');
+        }
+        return remotes;
+    }
+
+    private isSessionVisibleInLayer(session: TmuxSession, remoteId: string): boolean {
+        if (!this.configManager.isWorkspaceLayer() || normalizeRemoteId(remoteId) !== LOCAL_REMOTE_ID) {
+            return true;
+        }
+
+        return this.isPathInsideWorkspace(session.path);
+    }
+
+    private isZellijSessionVisibleInLayer(remoteId: string): boolean {
+        return !(this.configManager.isWorkspaceLayer() && normalizeRemoteId(remoteId) === LOCAL_REMOTE_ID);
+    }
+
+    private isPathInsideWorkspace(sessionPath?: string): boolean {
+        if (!sessionPath || sessionPath === '~') {
+            return false;
+        }
+
+        const workspaceRoots = vscode.workspace.workspaceFolders
+            ?.map(folder => this.normalizeComparablePath(folder.uri.fsPath))
+            .filter(Boolean) || [];
+        if (workspaceRoots.length === 0) {
+            return false;
+        }
+
+        const normalizedSessionPath = this.normalizeComparablePath(sessionPath);
+        return workspaceRoots.some(root => (
+            normalizedSessionPath === root ||
+            normalizedSessionPath.startsWith(root.endsWith('/') ? root : `${root}/`)
+        ));
+    }
+
+    private normalizeComparablePath(inputPath: string): string {
+        return path.posix.normalize(inputPath.replace(/\\/g, '/')).replace(/\/+$/, '');
     }
 
     private shouldRefreshSshRemote(remote: RemoteConfig): boolean {
@@ -898,6 +936,10 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
     }
 
     private shouldGroupByRemote(items: TaskItem[], remotes: RemoteConfig[]): boolean {
+        if (this.configManager.isRemoteLayer() || this.configManager.isWorkspaceLayer()) {
+            return true;
+        }
+
         if (remotes.length > 1) {
             return true;
         }

@@ -69,6 +69,14 @@ export class ConfigManager {
         return this.layerMode;
     }
 
+    isWorkspaceLayer(): boolean {
+        return this.layerMode === 'workspace';
+    }
+
+    isRemoteLayer(): boolean {
+        return this.layerMode === 'remote';
+    }
+
     async setLayerMode(mode: LayerMode): Promise<TerminalTasksConfig> {
         this.layerMode = mode;
         this.executionMode = this.getExecutionModeForLayer(mode);
