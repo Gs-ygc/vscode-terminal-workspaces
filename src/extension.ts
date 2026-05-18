@@ -154,6 +154,21 @@ function getSshConfigSourceLabel(): string {
         : 'Remote/workspace SSH config';
 }
 
+function ensureSshRemoteCanUseLocalTerminal(remote: RemoteConfig): boolean {
+    if (remote.type !== 'ssh') {
+        return true;
+    }
+
+    if (getCurrentExtensionKind() === vscode.ExtensionKind.UI) {
+        return true;
+    }
+
+    vscode.window.showErrorMessage(
+        `Remote "${remote.label}" must be opened from the local UI extension host. Install Terminal Workspaces 0.8.6+ locally and reload VS Code.`
+    );
+    return false;
+}
+
 function parseSshConfig(content: string, source: string): SshConfigHost[] {
     const hosts: SshConfigHost[] = [];
     let current: SshConfigHost[] = [];
@@ -1108,6 +1123,10 @@ export function activate(context: vscode.ExtensionContext) {
         remote: RemoteConfig,
         options: { show?: boolean; createFresh?: boolean; remember?: boolean } = {}
     ): Promise<vscode.Terminal> => {
+        if (!ensureSshRemoteCanUseLocalTerminal(remote)) {
+            throw new Error(`Cannot open SSH remote "${remote.label}" from workspace extension host`);
+        }
+
         const terminalName = getSessionTerminalName(kind, sessionName, remote.id);
         disposeRestoredTerminalByName(terminalName);
 
@@ -1199,6 +1218,11 @@ export function activate(context: vscode.ExtensionContext) {
     const runTaskDirectly = async (task: TerminalTaskItem) => {
         const terminalName = getTaskTerminalName(task);
         const legacyTerminalName = getLegacyTaskTerminalName(task);
+        const taskRemote = configManager.getTaskRemote(task);
+        if (!ensureSshRemoteCanUseLocalTerminal(taskRemote)) {
+            return;
+        }
+
         const taskProfile = configManager.getProfile(task.profileId || configManager.getConfigSync()?.defaultProfileId || 'bash-tmux');
         const taskUsesTmux = taskProfile?.tmux?.enabled || task.overrides?.tmux?.enabled;
         const taskUsesZellij = !taskUsesTmux && (taskProfile?.zellij?.enabled || task.overrides?.zellij?.enabled);
@@ -1236,9 +1260,8 @@ export function activate(context: vscode.ExtensionContext) {
         // Auto-delete EXITED zellij sessions before launching to avoid resurrection issues
         if (taskUsesZellij) {
             const sessionName = task.overrides?.zellij?.sessionName || taskProfile?.zellij?.sessionName || task.name;
-            const remote = configManager.getTaskRemote(task);
-            if (ZellijManager.isSessionExited(sessionName, remote)) {
-                ZellijManager.deleteSessionSync(sessionName, remote);
+            if (ZellijManager.isSessionExited(sessionName, taskRemote)) {
+                ZellijManager.deleteSessionSync(sessionName, taskRemote);
             }
         }
 
