@@ -1207,6 +1207,16 @@ export function activate(context: vscode.ExtensionContext) {
         return configManager.getRemote(session.remoteId);
     };
 
+    const getItemRemote = (item: TaskTreeItem, remoteId: string): RemoteConfig => {
+        if (item.itemData?.type === 'tmuxSession') {
+            return getSessionRemote((item.itemData as TmuxSessionData).session);
+        }
+        if (item.itemData?.type === 'zellijSession') {
+            return getSessionRemote((item.itemData as ZellijSessionData).session);
+        }
+        return configManager.getRemote(remoteId);
+    };
+
     const getSessionTerminalName = (kind: 'tmux' | 'zellij', sessionName: string, remoteId?: string): string => {
         const normalizedRemoteId = normalizeRemoteId(remoteId);
         return normalizedRemoteId === LOCAL_REMOTE_ID
@@ -1274,7 +1284,7 @@ export function activate(context: vscode.ExtensionContext) {
             getTaskRemoteId(task) === LOCAL_REMOTE_ID ? task.name : undefined
         ].filter((name): name is string => Boolean(name));
         const existingTerminal = taskUsesMultiplexer
-            ? candidateNames.map(findManagedTerminalByName).find((terminal): terminal is vscode.Terminal => Boolean(terminal))
+            ? findManagedTerminalByName(terminalName) || (legacyTerminalName ? findManagedTerminalByName(legacyTerminalName) : undefined)
             : candidateNames.map(findTerminalByName).find((terminal): terminal is vscode.Terminal => Boolean(terminal));
 
         if (existingTerminal) {
@@ -1924,7 +1934,7 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 // Close any VS Code terminal attached to this session
                 // Check both naming conventions: "tmux: sessionName" and raw task name
-                const remote = configManager.getRemote(remoteId);
+                const remote = getItemRemote(item, remoteId);
                 const tmuxTerminalName = getSessionTerminalName('tmux', sessionName, remoteId);
                 let existingTerminal = findTerminalByName(tmuxTerminalName);
                 if (existingTerminal) {
@@ -2103,7 +2113,7 @@ export function activate(context: vscode.ExtensionContext) {
             try {
                 // Close any VS Code terminal attached to this session
                 // Check both naming conventions: "zellij: sessionName" and raw task name
-                const remote = configManager.getRemote(remoteId);
+                const remote = getItemRemote(item, remoteId);
                 const zellijTerminalName = getSessionTerminalName('zellij', sessionName, remoteId);
                 let existingTerminal = findTerminalByName(zellijTerminalName);
                 if (existingTerminal) {
@@ -2208,7 +2218,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             try {
                 // Close any VS Code terminal attached to this session
-                const remote = configManager.getRemote(remoteId);
+                const remote = getItemRemote(item, remoteId);
                 const zellijTerminalName = getSessionTerminalName('zellij', sessionName, remoteId);
                 let existingTerminal = findTerminalByName(zellijTerminalName);
                 if (existingTerminal) {
