@@ -18,6 +18,14 @@ export function shellQuote(value: string): string {
     return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+function buildRemoteShellInvocation(remote: RemoteConfig, remoteCommand: string): string {
+    const escapedCommand = remoteCommand.replace(/'/g, "'\\''");
+    if (remote.shell) {
+        return `${shellQuote(remote.shell)} -ic '${escapedCommand}'`;
+    }
+    return `sh -lc 'exec "\${SHELL:-sh}" -ic '\\''${escapedCommand}'\\'''`;
+}
+
 /**
  * Quote a value for embedding inside an SSH remote command that will itself be
  * wrapped in outer single-quotes (see buildSshCommand). Uses double-quotes
@@ -42,16 +50,15 @@ export function buildSshCommand(remote: RemoteConfig, remoteCommand: string, all
         remote.host
     ].map(arg => (/\s/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg));
 
-    // Wrap the remote command in `<shell> -ic '...'`:
-    //   - shell defaults to '$SHELL' (evaluated on the remote side), which uses
-    //     the user's login shell and sources its rc file, picking up PATH etc.
+    // Wrap the remote command in an interactive shell:
+    //   - by default, ask the remote POSIX sh to expand "$SHELL" before exec'ing
+    //     the user's login shell; quoting "$SHELL" literally would try to run a
+    //     command named "$SHELL".
     //   - outer single-quotes prevent the LOCAL shell (PowerShell or bash) from
     //     expanding $HOME / $PATH / $SHELL before the command reaches SSH.
     //   - Any single-quotes inside remoteCommand are escaped with the classic
     //     POSIX workaround: end-quote + escaped-quote + start-quote ('\'')
-    const shell = remote.shell || '$SHELL';
-    const escapedForSingleQuote = remoteCommand.replace(/'/g, "'\\''")
-    const wrappedCmd = `'${shell}' -ic '${escapedForSingleQuote}'`;
+    const wrappedCmd = buildRemoteShellInvocation(remote, remoteCommand);
 
     // The whole thing is an unquoted argument on the local side — no outer
     // quotes needed because localArgs already handles whitespace in host/args.
