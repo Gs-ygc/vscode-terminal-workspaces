@@ -2,7 +2,7 @@
   "name": "terminal-workspaces",
   "displayName": "Terminal Workspaces",
   "description": "Manage terminal sessions with a sidebar GUI. Supports WSL, tmux, Zellij, PowerShell, nested folders, profiles, and more. Perfect for multi-project and agentic coding workflows.",
-  "version": "0.8.14",
+  "version": "0.8.15",
   "publisher": "cybersader",
   "license": "MIT",
   "icon": "images/icon.png",
@@ -270,6 +270,11 @@
       {
         "command": "terminalWorkspaces.deleteAllExitedZellijSessions",
         "title": "Delete All EXITED Zellij Sessions",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "terminalWorkspaces.deleteAllZellijSessions",
+        "title": "Delete All Zellij Sessions",
         "icon": "$(trash)"
       },
       {
@@ -664,6 +669,11 @@
           "command": "terminalWorkspaces.deleteAllExitedZellijSessions",
           "when": "view == terminalWorkspacesView && viewItem == zellijSessionsHeader",
           "group": "3_delete@1"
+        },
+        {
+          "command": "terminalWorkspaces.deleteAllZellijSessions",
+          "when": "view == terminalWorkspacesView && viewItem == zellijSessionsHeader",
+          "group": "3_delete@2"
         }
       ]
     },

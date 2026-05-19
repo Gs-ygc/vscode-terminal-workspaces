@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { ConfigManager, ConfigMode, ConfigScope, LayerMode, ExecutionMode } from './configManager';
-import { TerminalTasksProvider, TaskTreeItem, TaskConfigDialog, FolderQuickPick, TmuxSessionData, ZellijSessionData, TerminalTasksDragAndDropController } from './terminalWorkspacesProvider';
+import { TerminalTasksProvider, TaskTreeItem, TaskConfigDialog, FolderQuickPick, TmuxSessionData, ZellijSessionData, ZellijSessionsHeader, TerminalTasksDragAndDropController } from './terminalWorkspacesProvider';
 import { RemoteConfig, TerminalTaskItem, TaskFolder } from './types';
 import { TmuxManager, TmuxSession } from './tmuxManager';
 import { ZellijManager, ZellijSession } from './zellijManager';
@@ -1213,6 +1213,13 @@ export function activate(context: vscode.ExtensionContext) {
         }
         if (item.itemData?.type === 'zellijSession') {
             return getSessionRemote((item.itemData as ZellijSessionData).session);
+        }
+        return configManager.getRemote(remoteId);
+    };
+
+    const getRemoteForTreeRemoteId = (remoteId?: string): RemoteConfig => {
+        if (normalizeRemoteId(remoteId) === LOCAL_REMOTE_ID) {
+            return configManager.getLayerHostRemote();
         }
         return configManager.getRemote(remoteId);
     };
@@ -2532,9 +2539,12 @@ export function activate(context: vscode.ExtensionContext) {
 
     const deleteAllExitedZellijSessionsCommand = vscode.commands.registerCommand(
         'terminalWorkspaces.deleteAllExitedZellijSessions',
-        async () => {
-            // Get all zellij sessions and filter to EXITED ones
-            const allSessions = ZellijManager.getSessions();
+        async (item?: TaskTreeItem) => {
+            const remoteId = item?.itemData?.type === 'zellijSessionsHeader'
+                ? normalizeRemoteId((item.itemData as ZellijSessionsHeader).remoteId)
+                : LOCAL_REMOTE_ID;
+            const remote = getRemoteForTreeRemoteId(remoteId);
+            const allSessions = ZellijManager.getSessions(remote);
             const exitedSessions = allSessions.filter(s => s.exited);
 
             if (exitedSessions.length === 0) {
@@ -2559,7 +2569,9 @@ export function activate(context: vscode.ExtensionContext) {
 
             for (const session of exitedSessions) {
                 try {
-                    const command = shouldUseLocalMultiplexerCommand()
+                    const command = remote.type === 'ssh'
+                        ? ZellijManager.getDeleteCommand(session.name, remote)
+                        : shouldUseLocalMultiplexerCommand()
                         ? ZellijManager.getDeleteCommand(session.name)
                         : ZellijManager.getDeleteCommandForWSL(session.name);
 
@@ -2589,6 +2601,68 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.window.showWarningMessage(`Deleted ${deletedCount} session(s), ${failedCount} failed`);
             } else {
                 vscode.window.showInformationMessage(`Deleted ${deletedCount} EXITED zellij session(s)`);
+            }
+
+            setTimeout(() => {
+                treeDataProvider.refresh();
+            }, 200);
+        }
+    );
+
+    const deleteAllZellijSessionsCommand = vscode.commands.registerCommand(
+        'terminalWorkspaces.deleteAllZellijSessions',
+        async (item?: TaskTreeItem) => {
+            const remoteId = item?.itemData?.type === 'zellijSessionsHeader'
+                ? normalizeRemoteId((item.itemData as ZellijSessionsHeader).remoteId)
+                : LOCAL_REMOTE_ID;
+            const remote = getRemoteForTreeRemoteId(remoteId);
+            const sessions = ZellijManager.getSessions(remote);
+
+            if (sessions.length === 0) {
+                vscode.window.showInformationMessage('No zellij sessions to delete');
+                return;
+            }
+
+            const confirm = await vscode.window.showWarningMessage(
+                `Kill and permanently delete ${sessions.length} zellij session(s)? This cannot be undone.`,
+                { modal: true },
+                'Delete All'
+            );
+
+            if (confirm !== 'Delete All') {
+                return;
+            }
+
+            const { exec } = require('child_process');
+            let deletedCount = 0;
+            let failedCount = 0;
+
+            for (const session of sessions) {
+                const command = remote.type === 'ssh'
+                    ? ZellijManager.getDeleteCommand(session.name, remote)
+                    : shouldUseLocalMultiplexerCommand()
+                    ? ZellijManager.getDeleteCommand(session.name)
+                    : ZellijManager.getDeleteCommandForWSL(session.name);
+
+                await new Promise<void>((resolve) => {
+                    exec(command, (error: Error | null) => {
+                        const isNotFound = error?.message?.includes('session not found') ||
+                            error?.message?.includes('No zellij server listening') ||
+                            error?.message?.includes("doesn't exist");
+                        if (error && !isNotFound) {
+                            failedCount++;
+                        } else {
+                            deletedCount++;
+                        }
+                        resolve();
+                    });
+                });
+            }
+
+            if (failedCount > 0) {
+                vscode.window.showWarningMessage(`Deleted ${deletedCount} session(s), ${failedCount} failed`);
+            } else {
+                vscode.window.showInformationMessage(`Deleted ${deletedCount} zellij session(s)`);
             }
 
             setTimeout(() => {
@@ -2957,6 +3031,7 @@ export function activate(context: vscode.ExtensionContext) {
         attachAllZellijSessionsCommand,
         refreshZellijSessionsCommand,
         deleteAllExitedZellijSessionsCommand,
+        deleteAllZellijSessionsCommand,
         toggleActiveFilterCommand,
         toggleActiveFilterOffCommand,
         configWatcher
