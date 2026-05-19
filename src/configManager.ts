@@ -877,13 +877,14 @@ export class ConfigManager {
         const remote = this.getTaskRemote(task);
         if (remote.type === 'ssh') {
             const sessionName = this.getSessionName(merged, task.name);
-            const remoteCommand = this.buildBashCommand(task.path, sessionName, merged);
+            const remoteCommand = this.buildBashCommand(this.toPosixPath(task.path), sessionName, merged);
             return { command: buildSshCommand(remote, remoteCommand, true) };
         }
         return this.generateCommand(task.path, task.name, merged);
     }
 
     private generateCommand(folderPath: string, taskName: string, profile: Profile): { command: string; shellOptions?: { executable?: string; args?: string[] } } {
+        const posixPath = this.toPosixPath(folderPath);
         const wslPath = this.toWslPath(folderPath);
         const windowsPath = this.toWindowsPath(folderPath);
 
@@ -897,7 +898,7 @@ export class ConfigManager {
             case 'wsl':
                 if (!this.isWindows()) {
                     // Remote hosts and native Unix-like systems run shell commands directly.
-                    command = this.buildBashCommand(wslPath, sessionName, profile);
+                    command = this.buildBashCommand(posixPath, sessionName, profile);
                 } else {
                     // On Windows, use wsl.exe
                     command = `wsl.exe --cd "${windowsPath}"`;
@@ -912,7 +913,7 @@ export class ConfigManager {
 
             case 'wsl-bash':
                 if (!this.isWindows()) {
-                    command = this.buildBashCommand(wslPath, sessionName, profile);
+                    command = this.buildBashCommand(posixPath, sessionName, profile);
                 } else {
                     command = `wsl.exe -e bash -c "${this.buildBashCommand(wslPath, sessionName, profile).replace(/"/g, '\\"')}"`;
                     shellOptions = { executable: 'cmd.exe', args: ['/C'] };
@@ -937,17 +938,17 @@ export class ConfigManager {
 
             case 'bash':
             case 'zsh':
-                command = this.buildBashCommand(folderPath, sessionName, profile);
+                command = this.buildBashCommand(this.isWindows() ? folderPath : posixPath, sessionName, profile);
                 break;
 
             case 'default':
                 // Use VS Code's default - minimal command
-                command = `cd '${this.isWindows() ? windowsPath : folderPath}'`;
+                command = `cd '${this.isWindows() ? windowsPath : posixPath}'`;
                 break;
 
             case 'custom':
                 if (profile.customShell) {
-                    command = this.buildBashCommand(folderPath, sessionName, profile);
+                    command = this.buildBashCommand(this.isWindows() ? folderPath : posixPath, sessionName, profile);
                     shellOptions = {
                         executable: profile.customShell,
                         args: profile.customShellArgs
@@ -1077,6 +1078,16 @@ export class ConfigManager {
             return `/mnt/${drive}/${subPath}`;
         }
         return inputPath.replace(/\\/g, '/');
+    }
+
+    private toPosixPath(inputPath: string): string {
+        if (/^\\[A-Za-z]:/.test(inputPath)) {
+            return inputPath.replace(/\\/g, '/').replace(/^\/([A-Za-z]):/, (_match, drive: string) => `/mnt/${drive.toLowerCase()}`);
+        }
+        if (inputPath.startsWith('\\') && !inputPath.startsWith('\\\\')) {
+            return inputPath.replace(/\\/g, '/');
+        }
+        return inputPath;
     }
 
     private toWindowsPath(inputPath: string): string {
