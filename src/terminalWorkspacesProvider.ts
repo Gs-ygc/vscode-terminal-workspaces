@@ -353,7 +353,7 @@ export class TerminalTasksProvider implements vscode.TreeDataProvider<TaskTreeIt
         const localRemotes = remotes.filter(r => r.type !== 'ssh');
         const sshRemotes = remotes.filter(r => r.type === 'ssh');
 
-        if (localRemotes.length === 0) {
+        if (!remotes.some(remote => normalizeRemoteId(remote.id) === LOCAL_REMOTE_ID)) {
             this.clearLocalHostSessionCache();
         }
 
